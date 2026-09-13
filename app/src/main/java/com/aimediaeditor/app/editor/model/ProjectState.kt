@@ -1,6 +1,7 @@
 package com.aimediaeditor.app.editor.model
 
 import com.aimediaeditor.app.data.media.MediaType
+import kotlinx.serialization.Serializable
 
 /**
  * The full, serializable state of an editing project -- the "Edit
@@ -11,8 +12,13 @@ import com.aimediaeditor.app.data.media.MediaType
  *
  * Deliberately Android-free (plain Kotlin, [sourceUri] as a String
  * rather than android.net.Uri) so this whole package compiles and is
- * unit-testable on a plain JVM, no emulator required.
+ * unit-testable on a plain JVM, no emulator required. kotlinx.serialization
+ * is a pure-Kotlin library, so @Serializable here doesn't compromise that --
+ * it's what lets [com.aimediaeditor.app.data.project.ProjectRepository]
+ * write this whole tree to disk as JSON for autosave/reopen (spec section 22)
+ * without a parallel hand-written serialization format to keep in sync.
  */
+@Serializable
 data class ProjectState(
     val id: String,
     val aspectRatio: AspectRatio = AspectRatio.RATIO_9_16,
@@ -37,6 +43,7 @@ enum class AspectRatio(val label: String) {
  * by editing; [trimStartMs]/[trimEndMs] describe what part of it plays
  * here, always measured against the original, untouched by [speed].
  */
+@Serializable
 data class VideoClip(
     val id: String,
     val sourceUri: String,
@@ -74,10 +81,12 @@ val VideoClip.maxTrimEndMs: Long
     get() = if (sourceType == MediaType.IMAGE) MAX_PHOTO_DURATION_MS else sourceDurationMs
 
 /** Normalized 0f..1f position within the frame -- resolution-independent. */
+@Serializable
 data class FocalPoint(val x: Float, val y: Float)
 
 enum class FilterType { NONE, CINEMATIC, BRIGHT, VIVID, MONOCHROME }
 
+@Serializable
 data class AudioTrack(
     val id: String,
     val sourceUri: String,
@@ -89,6 +98,7 @@ data class AudioTrack(
     val isLooping: Boolean = false
 )
 
+@Serializable
 data class TextOverlay(
     val id: String,
     val text: String,

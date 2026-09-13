@@ -2,15 +2,21 @@ package com.aimediaeditor.app.ui.home
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items as lazyRowItems
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -41,7 +47,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import coil3.compose.AsyncImage
 import com.aimediaeditor.app.data.media.MediaItem
 import com.aimediaeditor.app.data.media.MediaType
+import com.aimediaeditor.app.data.project.ProjectSummary
 import com.aimediaeditor.app.ui.permissions.rememberMediaPermissionState
+import com.aimediaeditor.app.ui.projects.ProjectThumbnail
 
 /**
  * Interaction model (changed this round -- previously a single tap toggled
@@ -57,10 +65,15 @@ import com.aimediaeditor.app.ui.permissions.rememberMediaPermissionState
 @Composable
 fun HomeScreen(
     viewModel: HomeViewModel = viewModel(),
-    onCreateProject: (List<MediaItem>) -> Unit = {}
+    onCreateProject: (List<MediaItem>) -> Unit = {},
+    onOpenProject: (String) -> Unit = {},
+    onOpenProjects: () -> Unit = {}
 ) {
     val permissionState = rememberMediaPermissionState()
     val uiState by viewModel.uiState.collectAsState()
+    val recentProjects by viewModel.recentProjects.collectAsState()
+
+    LaunchedEffect(Unit) { viewModel.refreshRecentProjects() }
 
     // View-only state, not persisted -- doesn't survive rotation yet (see
     // README known limitations), same trade-off as before this round.
@@ -108,11 +121,19 @@ fun HomeScreen(
             }
         }
     ) { padding ->
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
         ) {
+            if (!selectionMode && recentProjects.isNotEmpty()) {
+                RecentProjectsSection(
+                    projects = recentProjects,
+                    onOpenProject = onOpenProject,
+                    onSeeAll = onOpenProjects
+                )
+            }
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             when (val state = uiState) {
                 is HomeUiState.NoPermission -> PermissionRequest(onRequest = permissionState.request)
                 is HomeUiState.Loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
@@ -134,6 +155,7 @@ fun HomeScreen(
                         selectedIds = selectedIds + item.id
                     }
                 )
+            }
             }
         }
     }
@@ -266,6 +288,46 @@ private fun MediaThumbnail(
                         color = Color.White,
                         style = MaterialTheme.typography.labelSmall,
                         modifier = Modifier.align(Alignment.Center)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Spec section 3's "Projects: Show recent editable projects" -- kept compact, full management (rename/delete) lives on [com.aimediaeditor.app.ui.projects.ProjectsScreen]. */
+@Composable
+private fun RecentProjectsSection(
+    projects: List<ProjectSummary>,
+    onOpenProject: (String) -> Unit,
+    onSeeAll: () -> Unit
+) {
+    Column(modifier = Modifier.padding(top = 8.dp)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("Projects", style = MaterialTheme.typography.titleMedium)
+            TextButton(onClick = onSeeAll) { Text("See all") }
+        }
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            lazyRowItems(projects, key = { it.id }) { project ->
+                Column(
+                    modifier = Modifier
+                        .width(96.dp)
+                        .clickable { onOpenProject(project.id) }
+                ) {
+                    ProjectThumbnail(project, modifier = Modifier.size(96.dp))
+                    Text(
+                        text = project.name,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        modifier = Modifier.padding(top = 4.dp)
                     )
                 }
             }

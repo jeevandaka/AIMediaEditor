@@ -4,6 +4,7 @@ package com.aimediaeditor.app.ui.editor
 
 import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -13,8 +14,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -27,6 +30,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -57,7 +61,8 @@ private enum class PreviewMode { CLIP, TIMELINE }
 
 @Composable
 fun EditorScreen(
-    initialMedia: List<MediaItem>,
+    initialMedia: List<MediaItem> = emptyList(),
+    existingProjectId: String? = null,
     onBack: () -> Unit,
     viewModel: EditorViewModel = viewModel()
 ) {
@@ -65,7 +70,17 @@ fun EditorScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val uiState by viewModel.uiState.collectAsState()
 
-    LaunchedEffect(Unit) { viewModel.initializeProject(initialMedia) }
+    LaunchedEffect(existingProjectId) {
+        if (existingProjectId != null) viewModel.loadProject(existingProjectId) else viewModel.initializeProject(initialMedia)
+    }
+
+    // Flushes any pending debounced autosave the moment the user leaves this screen,
+    // by navigating back or by the app backgrounding -- both are points where losing the
+    // last ~800ms debounce window would mean losing an edit (spec section 22).
+    fun saveAndBack() {
+        viewModel.saveNow()
+        onBack()
+    }
 
     // One ExoPlayer for this whole screen -- created once, media item swapped as the
     // selected clip changes, released exactly once on dispose. Never a second instance
@@ -73,7 +88,11 @@ fun EditorScreen(
     val exoPlayer = remember { ExoPlayer.Builder(context).build() }
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE) exoPlayer.pause()
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> exoPlayer.pause()
+                Lifecycle.Event.ON_STOP -> viewModel.saveNow()
+                else -> Unit
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
@@ -118,6 +137,7 @@ fun EditorScreen(
 
     var showTextDialog by remember { mutableStateOf(false) }
     var showAudioDialog by remember { mutableStateOf(false) }
+    var showRenameDialog by remember { mutableStateOf(false) }
     var exportRequestId by remember { mutableStateOf<UUID?>(null) }
     var exportBlockedMessage by remember { mutableStateOf<String?>(null) }
     val workManager = remember { WorkManager.getInstance(context) }
@@ -127,8 +147,12 @@ fun EditorScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Edit project") },
-                navigationIcon = { TextButton(onClick = onBack) { Text("Back") } },
+                title = {
+                    TextButton(onClick = { showRenameDialog = true }) {
+                        Text(uiState.projectName, maxLines = 1)
+                    }
+                },
+                navigationIcon = { TextButton(onClick = ::saveAndBack) { Text("Back") } },
                 actions = {
                     TextButton(onClick = viewModel::undo, enabled = uiState.canUndo) { Text("Undo") }
                     TextButton(onClick = viewModel::redo, enabled = uiState.canRedo) { Text("Redo") }
@@ -148,6 +172,12 @@ fun EditorScreen(
             )
         }
     ) { padding ->
+        if (uiState.isLoading) {
+            Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+                CircularProgressIndicator(Modifier.align(Alignment.Center))
+            }
+            return@Scaffold
+        }
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -258,6 +288,29 @@ fun EditorScreen(
             }
         )
     }
+
+    if (showRenameDialog) {
+        RenameProjectDialog(
+            currentName = uiState.projectName,
+            onDismiss = { showRenameDialog = false },
+            onConfirm = { name ->
+                viewModel.renameProject(name)
+                showRenameDialog = false
+            }
+        )
+    }
+}
+
+@Composable
+private fun RenameProjectDialog(currentName: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+    var text by remember { mutableStateOf(currentName) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename project") },
+        text = { OutlinedTextField(value = text, onValueChange = { text = it }, singleLine = true) },
+        confirmButton = { TextButton(onClick = { onConfirm(text) }, enabled = text.isNotBlank()) { Text("Save") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
 }
 
 @Composable

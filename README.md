@@ -1,11 +1,13 @@
-# AI Media Editor — Phase 1–3: media browser, manual editor, real export
+# AI Media Editor — Phase 1–3: media browser, manual editor, real export, persistence
 
-Status: **manual editor + real Media3 export pipeline, device-verified.** The
-AI layer (natural-language prompts, media search/indexing) is not built yet
-— everything below is the conventional editor spec section 9 requires to
+Status: **manual editor + real Media3 export pipeline (device-verified) +
+project persistence/autosave (JVM-verified this round, not yet device-run).**
+The AI layer (natural-language prompts, media search/indexing) is not built
+yet — everything below is the conventional editor spec section 9 requires to
 exist on its own, plus the non-destructive EDL/command core spec section 21
 and the architecture notes require the AI layer to sit on top of later. See
-"What's not here yet" for exactly what's missing.
+"What's not here yet" for exactly what's missing, and "What's verified vs.
+not" for which parts of *this* round have actually been run.
 
 ## What's actually here
 
@@ -43,6 +45,46 @@ shows real progress, and writes the result to `MediaStore` — no forced
 watermark. This has been run on a real device and confirmed to produce a
 playable file with the edits present, not just compiled.
 
+**5. Project persistence and autosave (spec section 22).**
+`data/project/ProjectRepository.kt` writes each project as a JSON file
+(`ProjectState` + a name/timestamps wrapper, via `kotlinx.serialization`) to
+app-private internal storage, one file per project, written to a temp file
+and renamed into place so a crash mid-write can never leave a corrupt file
+behind. `EditorViewModel` autosaves on every edit (debounced ~800ms so a
+trim drag doesn't write on every frame) and flushes immediately when the
+screen stops or the user navigates back, so a killed app or a crash loses at
+most the in-flight debounce window, never the whole draft. Home shows a
+"Projects" row and a full `ProjectsScreen` lists every saved project
+(thumbnail, clip count, duration, last-updated) with rename and delete.
+Opening a project loads it back into a live, editable `ProjectHistory` —
+this is what makes "reopen app → recover draft → continue editing" (spec
+section 22) real rather than aspirational.
+
+## What's verified vs. not, this round
+
+The persistence work above is new, plain-Kotlin logic with no Media3/codec
+involvement, so it could actually be checked without a device: the exact
+`@Serializable` model in `editor/model/ProjectState.kt` and
+`data/project/ProjectRecord.kt` was copied into a standalone Kotlin/JVM
+Gradle project pinned to this repo's exact Kotlin (2.3.20) and
+`kotlinx-serialization-json` (1.9.0) versions, and round-tripped through
+encode → decode with a project containing multiple clips (video and photo),
+a null focal point, an audio track, a text overlay with non-ASCII text, and
+special characters in the project name — `decoded == original` held in
+every case, plus a forward-compatibility check (an unknown JSON field is
+ignored, not a crash) and an empty-project case. That's a genuine,
+reproducible pass, not "written carefully."
+
+What that check does *not* cover: the Android-specific half of
+`ProjectRepository` (`context.filesDir`, `File.renameTo`, WorkManager/
+Compose lifecycle timing for the debounce and the ON_STOP flush), and none
+of the new UI (`ProjectsScreen`, the rename dialog, Home's "Projects" row).
+Those still need the real-device pass described in "Build instructions" —
+this sandbox has no Android SDK, so nothing Android-specific in this round
+has been compiled, let alone run. Phases 1–3 (media browser, manual editor,
+export) remain exactly as previously device-verified; nothing about them
+changed this round.
+
 ## What's not here yet
 
 - **AI prompt interface** (spec sections 4–9, 21): no "Ask AI" screen, no
@@ -56,9 +98,6 @@ playable file with the edits present, not just compiled.
   clip: no crop/brightness/filters screen for a single photo.
 - **AI photo features** (background removal, smart crop as a standalone
   tool, object removal, generative fill) — none implemented.
-- **Projects list / autosave** (spec sections 22, 25): a project lives only
-  in the editor's in-memory `ViewModel` state for this session; closing the
-  app loses it. No Room persistence yet.
 - Text overlay styling (size/colour/font) — Media3 defaults only, no UI
   controls for them yet.
 - 4K export, thermal/low-RAM device tuning, proxy/preview-resolution
@@ -89,7 +128,9 @@ AIMediaEditor/
             ├── ui/permissions/MediaPermissionState.kt
             ├── ui/editor/{EditorScreen, TimelineStrip, TimelinePreview,
             │              ClipPreview, AddTextDialog, AddAudioDialog}.kt
+            ├── ui/projects/{ProjectsScreen, ProjectsViewModel}.kt
             ├── data/media/{MediaItem, MediaRepository, AudioRepository}.kt
+            ├── data/project/{ProjectRecord, ProjectRepository}.kt
             ├── editor/{EditorViewModel, MediaMapping}.kt
             ├── editor/model/{ProjectState, EditCommand, ProjectSanitizer,
             │                 ProjectHistory, CropMath, TimelinePositions}.kt
@@ -113,6 +154,7 @@ module boundary earns its build-time cost.
 | AndroidX WorkManager | 2.10.0 | Foreground export job (architecture-notes §2.4) |
 | AndroidX Lifecycle | 2.11.0 | `viewModel()` Compose helper |
 | Coil | 3.3.0 (`io.coil-kt.coil3`) | Local `content://` thumbnails, no network module |
+| kotlinx-serialization-json | 1.9.0 | Project (de)serialization for autosave; the Kotlin plugin variant is pinned to the Kotlin version above (guaranteed matching, not a guess) |
 | compileSdk / targetSdk / minSdk | 37 / 36 / 26 | targetSdk pinned one level back of compileSdk so Android 17's forced behavior changes don't land before they're deliberately handled |
 
 ## Build instructions
@@ -151,16 +193,22 @@ be parsed into once the prompt UI is built. When that's wired up:
 
 ## Known limitations
 
-- No project persistence — a project exists only in memory for the current
-  app session; closing the app loses unsaved edits (see "What's not here
-  yet").
+- Project persistence is file-per-project JSON, not Room — fine at the
+  "handful to a few dozen projects" scale an individual's device actually
+  has; `ProjectsScreen`/`HomeViewModel` re-read and re-parse every file on
+  each refresh, which would need to change before this scales to hundreds.
 - No pagination in `MediaRepository` — fine for a few hundred items, wrong
   for a multi-thousand-item library.
 - Text overlay styling is Media3-default only (no size/colour/font control).
 - Volume is flat per clip/track — no fades or automation.
-- Single module, no DI framework, no Room yet.
-- No automated test suite wired up (`app/src/test`) despite `editor/model/`
-  being pure, portable Kotlin that's well suited to one.
+- Project thumbnails reuse the same "no decoded video frame yet" limitation
+  as Home's grid — a video-first project shows a play glyph, not a frame.
+- Single module, no DI framework.
+- No automated test suite wired into the Gradle build itself
+  (`app/src/test`) despite `editor/model/` and `data/project/` being pure,
+  portable Kotlin that's well suited to one — this round's verification of
+  the persistence model (see "What's verified vs. not") was a standalone
+  script, not a checked-in, CI-runnable test.
 - Not verified: performance on low-RAM devices, 4K sources, thermal
   throttling during export, HDR tone-mapping.
 
@@ -185,6 +233,17 @@ Manual, on a real device (no SDK in this sandbox to run instrumented tests):
    volume, filter, crop, text (at the right moments, including a text
    window that spans a clip boundary), and audio.
 8. Export a project with no text/audio at all → confirm nothing regresses.
+9. Create a project, make an edit, background the app (Home button) without
+   exporting, then kill the app from Recents → relaunch → open it from
+   Home's "Projects" row or the Projects screen → confirm the edit is still
+   there (this is the actual crash-recovery claim from spec section 22;
+   items 1–8 above don't exercise it).
+10. Rename a project from the editor's title, and delete one from the
+    Projects screen → confirm both take effect and the delete confirmation
+    can be cancelled without deleting.
+11. Create several projects, confirm Home's "Projects" row and the full
+    Projects screen agree on what exists and show a sensible relative time
+    ("Just now", "Xm ago", etc.) that updates on revisit.
 
 ## Why it stops here
 
@@ -200,3 +259,11 @@ starting the prompt UI on top of it. `EditCommand` and `ProjectSanitizer`
 already exist specifically so the AI layer has a validated, closed surface
 to target next, without either layer needing to be rewritten to meet the
 other.
+
+This round picked project persistence for the same reason, not a different
+one: it's an explicit MVP "must have" (spec section 25, items 9/12/13) that
+was still missing, and unlike the AI layer it's plain Kotlin/JSON/file I/O
+with no codec or device-timing behavior to get subtly wrong — exactly the
+kind of foundation piece that can be genuinely checked from this sandbox
+(see "What's verified vs. not") rather than only written carefully and
+hoped for. The AI layer stays next, once this is confirmed on-device too.
