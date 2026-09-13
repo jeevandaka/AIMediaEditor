@@ -193,7 +193,15 @@ object CompositionBuilder {
         return Effects(audioProcessors, videoEffects)
     }
 
-    private fun filterEffects(filter: FilterType): List<Effect> = when (filter) {
+    /**
+     * Not private: [com.aimediaeditor.app.ui.editor.ClipPreview] reuses this exact
+     * mapping to live-preview a filter on the selected clip via
+     * `ExoPlayer.setVideoEffects()`. Reusing it (instead of a second hand-written
+     * mapping in the UI layer) is deliberate -- two implementations of "what a
+     * filter looks like" is exactly the shape of bug that produced the
+     * aspect-ratio/preview-vs-export divergence fixed in an earlier round.
+     */
+    internal fun filterEffects(filter: FilterType): List<Effect> = when (filter) {
         FilterType.NONE -> emptyList()
         FilterType.MONOCHROME -> listOf(RgbFilter.createGrayscaleFilter())
         FilterType.BRIGHT -> listOf(Brightness(0.25f))

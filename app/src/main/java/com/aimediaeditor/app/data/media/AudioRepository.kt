@@ -28,10 +28,16 @@ class AudioRepository(private val context: Context) {
             MediaStore.Audio.Media.DURATION
         )
         val items = mutableListOf<AudioItem>()
+        // No IS_MUSIC filter, deliberately -- that flag depends on tagging/scanner
+        // heuristics most real files (downloads, voice notes, anything not from a
+        // library-style music app) never get set, so filtering on it made this query
+        // return nothing for users who genuinely have audio on their device. This is
+        // the audio-table equivalent of MediaRepository's image/video queries, which
+        // don't filter by any such flag either.
         context.contentResolver.query(
             MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
             projection,
-            "${MediaStore.Audio.Media.IS_MUSIC} != 0",
+            null,
             null,
             "${MediaStore.Audio.Media.DISPLAY_NAME} ASC"
         )?.use { cursor ->

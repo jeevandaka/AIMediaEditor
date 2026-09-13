@@ -114,6 +114,26 @@ fun EditorScreen(
         }
     }
 
+    // Live filter preview for the selected video clip. Separate from the effect
+    // above on purpose: it must NOT re-trigger setMediaItem/prepare (that would
+    // restart playback from 0 every time a filter chip is tapped) -- setVideoEffects
+    // can be called on its own at any time. Reuses CompositionBuilder.filterEffects
+    // (the exact function export uses) rather than a second hand-written mapping, so
+    // this preview can't drift from what actually gets exported.
+    //
+    // Honest risk: ExoPlayer.setVideoEffects(List<Effect>) is a real, documented
+    // Media3 API for exactly this ("preview an effect live during playback"), but it
+    // could not be confirmed against this exact 1.11.0 artifact -- Media3 is published
+    // only to Google's Maven repo, which this sandbox has no network path to (same
+    // constraint noted throughout this README). If this doesn't compile, that's a
+    // signature/availability mismatch on this one call, not a problem with
+    // filterEffects() itself (which export already exercises).
+    LaunchedEffect(selectedClip?.id, selectedClip?.filter, previewMode) {
+        if (previewMode == PreviewMode.CLIP && selectedClip?.sourceType == MediaType.VIDEO) {
+            exoPlayer.setVideoEffects(CompositionBuilder.filterEffects(selectedClip.filter))
+        }
+    }
+
     // Only one of the two players is ever actively prepared at a time --
     // switching modes stops whichever one is becoming inactive first,
     // so there's never a moment with two concurrent decoders running

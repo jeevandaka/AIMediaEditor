@@ -1,13 +1,56 @@
 # AI Media Editor — Phase 1–3: media browser, manual editor, real export, persistence
 
 Status: **manual editor + real Media3 export pipeline (device-verified) +
-project persistence/autosave (JVM-verified this round, not yet device-run).**
-The AI layer (natural-language prompts, media search/indexing) is not built
-yet — everything below is the conventional editor spec section 9 requires to
-exist on its own, plus the non-destructive EDL/command core spec section 21
-and the architecture notes require the AI layer to sit on top of later. See
-"What's not here yet" for exactly what's missing, and "What's verified vs.
-not" for which parts of *this* round have actually been run.
+project persistence/autosave (JVM-verified) + four real-device bug fixes this
+round (below).** The AI layer (natural-language prompts, media search/
+indexing) is not built yet — everything below is the conventional editor
+spec section 9 requires to exist on its own, plus the non-destructive EDL/
+command core spec section 21 and the architecture notes require the AI layer
+to sit on top of later. See "What's not here yet" for exactly what's
+missing, and "What's verified vs. not" for which parts of the last two
+rounds have actually been run.
+
+## Bug fixes this round (reported from a real device)
+
+1. **"Add audio" showed no files despite having plenty on the device.**
+   `AudioRepository` filtered on `MediaStore.Audio.Media.IS_MUSIC != 0` —
+   that flag depends on scanner/tagging heuristics most real files (browser
+   downloads, voice notes, anything not from a library-style music app)
+   never get set. Filter removed; the audio query now matches how
+   `MediaRepository`'s own image/video queries work (no such flag filter).
+2. **Cropping one photo appeared to crop every photo in the project.**
+   The export path was already correct (`CompositionBuilder` applies each
+   clip's own `focalPoint`) — the bug was in the crop-overlay's Compose
+   state: it was keyed on the *focal point value*, and two never-cropped
+   photos both default to the same value (centre), so switching clips
+   didn't reset the drag state and the overlay kept showing the previous
+   photo's dragged position. Now keyed on the clip's id as well, in
+   `ui/editor/ClipPreview.kt`.
+3. **Filters appeared to do nothing.** They were only ever rendered in
+   "Play Timeline" mode by design — the single-clip preview intentionally
+   played the raw, unfiltered source, which looks indistinguishable from a
+   filter simply not working. The single-clip preview now shows filters
+   live too: a Compose `ColorMatrix` approximation for photos, and
+   `ExoPlayer.setVideoEffects()` (reusing the exact same
+   `CompositionBuilder.filterEffects()` export uses) for video.
+4. **A tall photo/video took over the whole editing screen**, pushing every
+   tool below it out of view — and dragging on it to scroll didn't work
+   either, because the crop overlay's full-area drag detector was
+   swallowing the gesture. The preview is now a fixed-height box
+   (`PREVIEW_HEIGHT` in `ClipPreview.kt`) that letterboxes/pillarboxes the
+   content instead of stretching to the source's own aspect ratio.
+
+None of these four have been re-verified on a device yet (this sandbox still
+has no Android SDK) — the crop and audio fixes are plain Kotlin/state-key
+logic with no Media3 uncertainty, the layout fix is a standard bounded-box
+Compose pattern, and the video-filter live preview is the one genuinely
+uncertain piece: `ExoPlayer.setVideoEffects()` is a real, documented Media3
+API for exactly this, but Media3 publishes only to Google's Maven repo,
+which this sandbox can't reach, so its exact signature at this version
+couldn't be confirmed (flagged in a comment at the call site in
+`EditorScreen.kt`). If it fails to compile, that one call is the first place
+to look — the underlying `filterEffects()` mapping it reuses is unchanged
+and already exercised by export.
 
 ## What's actually here
 
@@ -233,15 +276,26 @@ Manual, on a real device (no SDK in this sandbox to run instrumented tests):
    volume, filter, crop, text (at the right moments, including a text
    window that spans a clip boundary), and audio.
 8. Export a project with no text/audio at all → confirm nothing regresses.
-9. Create a project, make an edit, background the app (Home button) without
-   exporting, then kill the app from Recents → relaunch → open it from
-   Home's "Projects" row or the Projects screen → confirm the edit is still
-   there (this is the actual crash-recovery claim from spec section 22;
-   items 1–8 above don't exercise it).
-10. Rename a project from the editor's title, and delete one from the
+9a. Open "Add audio" → confirm it lists real audio files from the device
+    (this was the round-4 bug: it showed none before).
+9b. Select a photo, drag the crop overlay, then select a different
+    never-cropped photo → confirm the second photo's overlay is centred,
+    not showing the first photo's dragged position.
+9c. Select a filter on a photo, then on a video → confirm the single-clip
+    preview visibly changes for both (photo: immediately; video: check it
+    doesn't restart playback when the filter is applied).
+9d. Select a tall portrait photo or video → confirm the preview stays a
+    fixed height, doesn't cover the screen, and the page still scrolls to
+    reach the editing tools below it.
+10. Create a project, make an edit, background the app (Home button) without
+    exporting, then kill the app from Recents → relaunch → open it from
+    Home's "Projects" row or the Projects screen → confirm the edit is still
+    there (this is the actual crash-recovery claim from spec section 22;
+    items 1–8 above don't exercise it).
+11. Rename a project from the editor's title, and delete one from the
     Projects screen → confirm both take effect and the delete confirmation
     can be cancelled without deleting.
-11. Create several projects, confirm Home's "Projects" row and the full
+12. Create several projects, confirm Home's "Projects" row and the full
     Projects screen agree on what exists and show a sensible relative time
     ("Just now", "Xm ago", etc.) that updates on revisit.
 
