@@ -41,7 +41,12 @@ import com.aimediaeditor.app.editor.model.maxTrimEndMs
 // Not private: AudioTrackStrip shares this exact scale so a given timestamp lines up
 // at the same horizontal offset in both the video row and the audio lane below it.
 internal val PIXELS_PER_SECOND = 56.dp
-internal val MIN_CLIP_WIDTH = 40.dp
+// Must stay wide enough that the reorder grip (22.dp, centered) and both trim handles
+// (14.dp each, at the edges) never overlap -- 14+22+14 = 50.dp is the exact minimum with
+// zero clearance; below that, a short clip's reorder grip and trim handle physically
+// share pixels, so touches near an edge could be claimed by either detectDragGestures,
+// and which one wins isn't guaranteed. 64.dp leaves real clearance on both sides.
+internal val MIN_CLIP_WIDTH = 64.dp
 private const val MIN_CLIP_DURATION_MS = 200L
 
 /**

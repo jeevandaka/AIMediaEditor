@@ -1,6 +1,7 @@
 package com.aimediaeditor.app.ui.editor
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
@@ -8,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -61,22 +63,30 @@ fun AudioTrackStrip(
         (projectDurationMs.coerceAtLeast(1000L) * pixelsPerMs).toDp()
     }
 
+    // Two nested boxes on purpose: the outer one is the scrollable VIEWPORT, sized by
+    // whatever its own parent gives it (fillMaxWidth from EditorScreen) -- that's what
+    // horizontalScroll needs to know how much of the content is actually visible. The
+    // inner one is the full-timeline-width CONTENT area the tracks are positioned within.
+    // Putting an explicit width on the SAME box as horizontalScroll (as an earlier version
+    // of this file did) collapses that distinction -- the "viewport" and "content" width
+    // become the same box, which is what made every drag on it fail to register correctly.
     Box(
         modifier = modifier
             .horizontalScroll(rememberScrollState())
             .height(48.dp)
-            .width(totalWidth)
             .padding(vertical = 4.dp)
     ) {
-        audioTracks.forEach { track ->
-            AudioTrackBlock(
-                track = track,
-                isSelected = track.id == selectedTrackId,
-                projectDurationMs = projectDurationMs,
-                pixelsPerMs = pixelsPerMs,
-                onSelect = { onSelect(track.id) },
-                onPositionCommitted = onPositionCommitted
-            )
+        Box(modifier = Modifier.width(totalWidth).fillMaxHeight()) {
+            audioTracks.forEach { track ->
+                AudioTrackBlock(
+                    track = track,
+                    isSelected = track.id == selectedTrackId,
+                    projectDurationMs = projectDurationMs,
+                    pixelsPerMs = pixelsPerMs,
+                    onSelect = { onSelect(track.id) },
+                    onPositionCommitted = onPositionCommitted
+                )
+            }
         }
     }
 }
@@ -111,17 +121,7 @@ private fun AudioTrackBlock(
             .fillMaxHeight()
             .clip(RoundedCornerShape(4.dp))
             .background(if (isSelected) Color(0xFF2D6A4F) else Color(0xFF1B4332))
-            .pointerInput(track.id) {
-                detectDragGestures(
-                    onDragStart = { onSelect() },
-                    onDragEnd = { onPositionCommitted(track.id, liveStart, liveDuration) },
-                    onDragCancel = { liveStart = track.startMs }
-                ) { change, dragAmount ->
-                    change.consume()
-                    val maxStart = (projectDurationMs - liveDuration).coerceAtLeast(0L)
-                    liveStart = (liveStart + (dragAmount.x / pixelsPerMs).toLong()).coerceIn(0L, maxStart)
-                }
-            }
+            .clickable(onClick = onSelect)
     ) {
         Text(
             "♪ %.1fs".format(liveDuration / 1000f),
@@ -130,10 +130,35 @@ private fun AudioTrackBlock(
             modifier = Modifier.align(Alignment.CenterStart).padding(start = 4.dp)
         )
 
-        // Only the length is draggable here (right edge) -- repositioning is the whole
-        // block's own drag gesture above. No left-edge handle: trimming which PART of the
-        // source plays (skipping its intro) is a separate, not-yet-built feature; this
-        // trims how MUCH of it plays, always starting from the source's own beginning.
+        // Dedicated grip for repositioning -- NOT the whole block, and not overlapping
+        // the trim handle below. An earlier version put the reposition drag on the whole
+        // block, which meant it and the trim handle's own drag detector were two
+        // competing detectDragGestures over the same region -- neither reliably won.
+        // This mirrors TimelineStrip's reorder grip, which uses the exact same
+        // separate-touch-target structure and is known to work.
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .size(22.dp)
+                .pointerInput(track.id) {
+                    detectDragGestures(
+                        onDragStart = { onSelect() },
+                        onDragEnd = { onPositionCommitted(track.id, liveStart, liveDuration) },
+                        onDragCancel = { liveStart = track.startMs }
+                    ) { change, dragAmount ->
+                        change.consume()
+                        val maxStart = (projectDurationMs - liveDuration).coerceAtLeast(0L)
+                        liveStart = (liveStart + (dragAmount.x / pixelsPerMs).toLong()).coerceIn(0L, maxStart)
+                    }
+                }
+        ) {
+            Text("↔", color = Color.White, style = MaterialTheme.typography.titleMedium)
+        }
+
+        // Only the length is draggable here (right edge) -- repositioning is the
+        // dedicated grip above. No left-edge handle: trimming which PART of the source
+        // plays (skipping its intro) is a separate, not-yet-built feature; this trims
+        // how MUCH of it plays, always starting from the source's own beginning.
         TrimHandle(
             alignment = Alignment.CenterEnd,
             onDrag = { deltaPx ->

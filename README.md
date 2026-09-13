@@ -58,6 +58,48 @@ couldn't be confirmed (flagged in a comment at the call site in
 to look — the underlying `filterEffects()` mapping it reuses is unchanged
 and already exercised by export.
 
+### Follow-up: the audio timeline UI above didn't actually work at all
+
+Reported immediately after the audio timeline round: neither dragging a
+track to reposition it nor dragging its edge to trim it did anything. Two
+real, concrete bugs, both in `AudioTrackStrip.kt`:
+
+- **Layout**: the scrollable box also had an explicit `.width(totalWidth)`
+  on it directly — collapsing the distinction between "how much is visible"
+  (the scroll viewport) and "how wide the full timeline is" (the content),
+  which `horizontalScroll` needs kept separate. Fixed by nesting: an outer
+  box sized by its own parent (the scrollable viewport) containing an inner
+  box explicitly sized to `totalWidth` (the content the tracks are
+  positioned within) — the same shape `TimelineStrip`'s Row implicitly gets
+  for free from laying its clips out sequentially, but a Box of *absolutely*
+  -positioned children (needed here, since two tracks can overlap or leave
+  gaps) has to be told its content width explicitly.
+- **Gesture conflict**: the reposition-drag was attached to the *entire*
+  track block, which fully overlapped the trim handle sitting inside that
+  same block — two competing `detectDragGestures`, both real drag
+  recognizers, racing for the same touches. Replaced with a dedicated
+  22.dp grip (↔), separate from the trim handle, mirroring
+  `TimelineStrip`'s own reorder grip, which uses exactly this
+  separate-touch-target structure already.
+
+**Also reported at the same time: video clips "not able to trim."** Video's
+trim handles and reorder grip are structurally the same separate-touch-
+target pattern as above and weren't touched this round — but a real overlap
+was found there too: `MIN_CLIP_WIDTH` was 40.dp, while the reorder grip
+(22.dp, centered) plus both trim handles (14.dp each, at the edges) need
+50.dp of clearance with zero margin — so any clip at or near the minimum
+width (a short photo or a tightly trimmed clip, a likely case for the
+multi-photo projects this has been tested with) had its reorder grip and
+trim handles physically sharing pixels, the same conflict as the audio bug
+above, just conditional on clip width rather than present every time.
+Raised to 64.dp. This is a plausible, mechanical explanation for the video
+report and a genuine bug either way, but unlike the audio fixes it's not
+a confirmed root cause — if trimming still doesn't work after this on a
+clip that was already reasonably wide, that's a different bug, and the
+detail that would narrow it down is whether the white trim handles appear
+at all when the clip is selected, versus appearing but not responding to
+drag, versus responding but not sticking after the drag ends.
+
 ## What's actually here
 
 **1. Media browser (Phase 1).** A home screen that queries `MediaStore`
