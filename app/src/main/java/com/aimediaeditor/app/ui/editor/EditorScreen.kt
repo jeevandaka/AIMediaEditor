@@ -134,6 +134,18 @@ fun EditorScreen(
         }
     }
 
+    // Same gap, for speed: SetSpeed already updated the clip's data (and export already
+    // reads it via CompositionBuilder's setSpeed on the EditedMediaItem), but nothing
+    // ever told the live preview's ExoPlayer to actually play faster/slower, so picking
+    // a speed chip looked like it did nothing. setPlaybackSpeed is base Player API (not
+    // an effects/Transformer call), so unlike setVideoEffects above this one has no
+    // version-availability uncertainty.
+    LaunchedEffect(selectedClip?.id, selectedClip?.speed, previewMode) {
+        if (previewMode == PreviewMode.CLIP && selectedClip?.sourceType == MediaType.VIDEO) {
+            exoPlayer.setPlaybackSpeed(selectedClip.speed)
+        }
+    }
+
     // Only one of the two players is ever actively prepared at a time --
     // switching modes stops whichever one is becoming inactive first,
     // so there's never a moment with two concurrent decoders running
