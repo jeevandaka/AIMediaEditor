@@ -24,6 +24,7 @@ object ProjectSanitizer {
     private const val MAX_VOLUME = 2f
     private const val MIN_SPEED = 0.25f
     private const val MAX_SPEED = 4f
+    private const val MIN_AUDIO_DURATION_MS = 300L
 
     fun apply(state: ProjectState, command: EditCommand): ProjectState = when (command) {
 
@@ -92,7 +93,11 @@ object ProjectSanitizer {
                 sourceUri = command.sourceUri,
                 startMs = command.startMs.coerceIn(0, state.durationMs.coerceAtLeast(0)),
                 volume = command.volume.coerceIn(0f, MAX_VOLUME),
-                sourceDurationMs = command.sourceDurationMs
+                sourceDurationMs = command.sourceDurationMs,
+                // Starts at its full source length (previous behaviour, before the
+                // audio timeline strip existed) -- the user can drag to trim it from there.
+                durationMs = command.sourceDurationMs.takeIf { it > 0L }
+                    ?: state.durationMs.coerceAtLeast(MIN_AUDIO_DURATION_MS)
             )
         )
 
@@ -119,6 +124,21 @@ object ProjectSanitizer {
         is EditCommand.SetAudioLooping -> state.copy(
             audioTracks = state.audioTracks.map {
                 if (it.id == command.trackId) it.copy(isLooping = command.isLooping) else it
+            }
+        )
+
+        is EditCommand.SetAudioPosition -> state.copy(
+            audioTracks = state.audioTracks.map { track ->
+                if (track.id != command.trackId) return@map track
+                // Duration can't exceed the source's own length -- Media3 needs a real
+                // stretch of the source file to play for one cycle; looping repeats that
+                // cycle rather than making a single cycle longer than the source itself.
+                val maxDuration = (track.sourceDurationMs.takeIf { it > 0L } ?: state.durationMs)
+                    .coerceAtLeast(MIN_AUDIO_DURATION_MS)
+                track.copy(
+                    startMs = command.startMs.coerceIn(0L, state.durationMs.coerceAtLeast(0L)),
+                    durationMs = command.durationMs.coerceIn(MIN_AUDIO_DURATION_MS, maxDuration)
+                )
             }
         )
 

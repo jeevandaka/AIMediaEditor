@@ -29,6 +29,13 @@ sealed interface EditCommand {
     data class SetClipVolume(val clipId: String, val volume: Float) : EditCommand
     data class SetAudioVolume(val trackId: String, val volume: Float) : EditCommand
     data class SetAudioLooping(val trackId: String, val isLooping: Boolean) : EditCommand
+    // Added this round: an audio track's placement (startMs) and length (durationMs)
+    // were only ever set once, implicitly, at AddAudio time -- there was no way to move
+    // or resize a track afterward, so "attach the music at exactly this point" wasn't
+    // possible without deleting and re-adding. The audio timeline strip commits both
+    // together (drag-to-reposition and drag-to-trim are the same gesture family as
+    // TrimClip/SmartReframe: live while dragging, one command on release).
+    data class SetAudioPosition(val trackId: String, val startMs: Long, val durationMs: Long) : EditCommand
     // Added in Phase 2: undo() can already reverse the most recent add, but a user
     // removing one specific earlier text/audio item shouldn't have to undo everything
     // that came after it too.

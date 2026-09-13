@@ -95,8 +95,25 @@ data class AudioTrack(
     val sourceDurationMs: Long = 0L,
     // Added this round: a track shorter than the video used to simply stop.
     // Looping repeats it for the remaining length of the visual sequence.
-    val isLooping: Boolean = false
+    val isLooping: Boolean = false,
+    // How long this track plays (one loop cycle, if looping) before it started being
+    // user-adjustable via the audio timeline strip. 0L means "not set" -- a project
+    // saved before this field existed, or a track that hasn't been resized since being
+    // added -- and is resolved through effectiveDurationMs below rather than treated
+    // as a real zero-length track.
+    val durationMs: Long = 0L
 )
+
+/**
+ * The single place that decides what "how long does this track actually play" means,
+ * so CompositionBuilder (export) and the audio timeline strip (UI) can never disagree:
+ * an explicit user-set duration wins, then the source's own length, then (only for a
+ * source whose duration couldn't be read) the project's own length.
+ */
+fun AudioTrack.effectiveDurationMs(projectDurationMs: Long): Long =
+    durationMs.takeIf { it > 0L }
+        ?: sourceDurationMs.takeIf { it > 0L }
+        ?: projectDurationMs.coerceAtLeast(1000L)
 
 @Serializable
 data class TextOverlay(

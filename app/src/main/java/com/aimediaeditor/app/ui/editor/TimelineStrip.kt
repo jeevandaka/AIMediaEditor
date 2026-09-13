@@ -38,8 +38,10 @@ import com.aimediaeditor.app.data.media.MediaType
 import com.aimediaeditor.app.editor.model.VideoClip
 import com.aimediaeditor.app.editor.model.maxTrimEndMs
 
-private val PIXELS_PER_SECOND = 56.dp
-private val MIN_CLIP_WIDTH = 40.dp
+// Not private: AudioTrackStrip shares this exact scale so a given timestamp lines up
+// at the same horizontal offset in both the video row and the audio lane below it.
+internal val PIXELS_PER_SECOND = 56.dp
+internal val MIN_CLIP_WIDTH = 40.dp
 private const val MIN_CLIP_DURATION_MS = 200L
 
 /**
@@ -201,9 +203,10 @@ private fun ClipItem(
     }
 }
 
-/** BoxScope extension so it can align itself to either edge of the caller's Box. */
+/** BoxScope extension so it can align itself to either edge of the caller's Box. Not
+ *  private: AudioTrackStrip reuses this exact handle for the same drag-to-trim feel. */
 @Composable
-private fun BoxScope.TrimHandle(
+internal fun BoxScope.TrimHandle(
     alignment: Alignment,
     onDrag: (deltaPx: Float) -> Unit,
     onDragEnd: () -> Unit

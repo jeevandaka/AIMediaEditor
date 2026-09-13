@@ -1,14 +1,14 @@
 # AI Media Editor — Phase 1–3: media browser, manual editor, real export, persistence
 
 Status: **manual editor + real Media3 export pipeline (device-verified) +
-project persistence/autosave (JVM-verified) + four real-device bug fixes this
-round (below).** The AI layer (natural-language prompts, media search/
-indexing) is not built yet — everything below is the conventional editor
-spec section 9 requires to exist on its own, plus the non-destructive EDL/
-command core spec section 21 and the architecture notes require the AI layer
-to sit on top of later. See "What's not here yet" for exactly what's
-missing, and "What's verified vs. not" for which parts of the last two
-rounds have actually been run.
+project persistence/autosave (JVM-verified) + five real-device bug fixes +
+a draggable audio timeline (below).** The AI layer (natural-language
+prompts, media search/indexing) is not built yet — everything below is the
+conventional editor spec section 9 requires to exist on its own, plus the
+non-destructive EDL/command core spec section 21 and the architecture notes
+require the AI layer to sit on top of later. See "What's not here yet" for
+exactly what's missing, and "What's verified vs. not" for which parts of the
+last few rounds have actually been run.
 
 ## Bug fixes this round (reported from a real device)
 
@@ -39,8 +39,14 @@ rounds have actually been run.
    swallowing the gesture. The preview is now a fixed-height box
    (`PREVIEW_HEIGHT` in `ClipPreview.kt`) that letterboxes/pillarboxes the
    content instead of stretching to the source's own aspect ratio.
+5. **A video clip's speed setting didn't visibly change anything.** Same
+   root cause as filters (#3): `SetSpeed` updated the clip's data, and
+   export already read it, but nothing told the live preview's `ExoPlayer`
+   to actually change its playback rate. Fixed with
+   `exoPlayer.setPlaybackSpeed(clip.speed)` — this one has no version
+   uncertainty, since it's base `Player` API, not a Transformer/effects call.
 
-None of these four have been re-verified on a device yet (this sandbox still
+None of these five have been re-verified on a device yet (this sandbox still
 has no Android SDK) — the crop and audio fixes are plain Kotlin/state-key
 logic with no Media3 uncertainty, the layout fix is a standard bounded-box
 Compose pattern, and the video-filter live preview is the one genuinely
@@ -70,13 +76,18 @@ directly — it only ever emits `EditCommand`s. Original media is never
 touched; the project only stores `content://` URI references.
 
 **3. Manual timeline editor (Phase 2).** `ui/editor/EditorScreen.kt` +
-`TimelineStrip`/`TimelinePreview`/`ClipPreview`: import photos and videos,
-reorder, trim, split, delete, set per-clip speed/volume/filter, add text
-overlays (position + time window), add an audio track (with looping),
-undo/redo via `ProjectHistory`, live preview that plays the edited sequence
-(not the raw source), and aspect-ratio selection (9:16, 16:9, 1:1, 4:5) with
-Smart Reframe-style focal-point cropping (`CropMath`) rather than a plain
-centre crop.
+`TimelineStrip`/`TimelinePreview`/`ClipPreview`/`AudioTrackStrip`: import
+photos and videos, reorder, trim, split, delete, set per-clip speed/volume/
+filter, add text overlays (position + time window), add an audio track and
+drag it into place — reposition by dragging the block, trim its length by
+dragging its right edge, both directly on a timeline lane under the video
+clips (volume presets and looping stay as toggle chips) — undo/redo via
+`ProjectHistory`, live preview that plays the edited sequence (not the raw
+source), and aspect-ratio selection (9:16, 16:9, 1:1, 4:5) with Smart
+Reframe-style focal-point cropping (`CropMath`) rather than a plain centre
+crop. Crop today is still reposition-only within one of those four fixed
+ratios — a freeform, drag-to-resize crop rectangle (WhatsApp-style) is a
+requested but not yet built follow-up.
 
 **4. Real export pipeline (Phase 3).** `editor/export/CompositionBuilder.kt`
 builds an actual Media3 `Composition` from the project — per-clip trim,
@@ -128,6 +139,21 @@ has been compiled, let alone run. Phases 1–3 (media browser, manual editor,
 export) remain exactly as previously device-verified; nothing about them
 changed this round.
 
+The audio timeline UI's data model (`AudioTrack.durationMs`,
+`effectiveDurationMs`) was re-verified the same way: the updated
+`@Serializable` shape was round-tripped again in the same standalone
+project, including a project saved *before* `durationMs` existed (no such
+key in the JSON at all) to confirm it still decodes cleanly using the
+default rather than crashing — that passed. What's genuinely new risk and
+NOT verified: `CompositionBuilder.buildAudioSequence` now applies a
+`MediaItem.ClippingConfiguration` to trim an audio track's played length
+(mirroring how `buildVideoItem` already trims video, which the "Bug fixes"
+section above didn't need to touch) instead of relying on `setDurationUs`
+alone, which is documented as a fallback for sources whose length can't be
+read from the file itself — for a real audio file, unlikely to actually
+truncate playback. The video-side pattern this mirrors is already
+device-verified; the audio-side application of it is not.
+
 ## What's not here yet
 
 - **AI prompt interface** (spec sections 4–9, 21): no "Ask AI" screen, no
@@ -170,7 +196,8 @@ AIMediaEditor/
             ├── ui/home/{HomeScreen, HomeViewModel, MediaPreviewDialog}.kt
             ├── ui/permissions/MediaPermissionState.kt
             ├── ui/editor/{EditorScreen, TimelineStrip, TimelinePreview,
-            │              ClipPreview, AddTextDialog, AddAudioDialog}.kt
+            │              ClipPreview, AudioTrackStrip, AddTextDialog,
+            │              AddAudioDialog}.kt
             ├── ui/projects/{ProjectsScreen, ProjectsViewModel}.kt
             ├── data/media/{MediaItem, MediaRepository, AudioRepository}.kt
             ├── data/project/{ProjectRecord, ProjectRepository}.kt
@@ -244,6 +271,16 @@ be parsed into once the prompt UI is built. When that's wired up:
   for a multi-thousand-item library.
 - Text overlay styling is Media3-default only (no size/colour/font control).
 - Volume is flat per clip/track — no fades or automation.
+- The audio timeline lane (`AudioTrackStrip`) scrolls independently of the
+  video clip row above it, not in synced lockstep — both use the same
+  pixels-per-second scale so a given timestamp lines up at the same
+  horizontal offset in either, but scrolling one doesn't move the other.
+  Trimming an audio track's length also only trims from the end, always
+  starting at the source's own beginning — there's no way yet to skip past
+  the start of a song (drag its left edge) the way a video clip's left trim
+  handle already works.
+- Crop is reposition-only within 9:16/16:9/1:1/4:5 — no freeform,
+  drag-to-resize crop rectangle yet (requested, not yet built).
 - Project thumbnails reuse the same "no decoded video frame yet" limitation
   as Home's grid — a video-first project shows a play glyph, not a frame.
 - Single module, no DI framework.
@@ -287,6 +324,15 @@ Manual, on a real device (no SDK in this sandbox to run instrumented tests):
 9d. Select a tall portrait photo or video → confirm the preview stays a
     fixed height, doesn't cover the screen, and the page still scrolls to
     reach the editing tools below it.
+9e. Select a speed preset on a video clip → confirm playback in the
+    single-clip preview actually speeds up/slows down, not just the value
+    shown on the chip.
+9f. Add an audio track, then drag its block on the timeline lane to a new
+    position and drag its right edge to shorten it → confirm both persist
+    after Undo/Redo and after Export (the exported file's music starts and
+    stops where you dragged it, not just where it visually looked right in
+    the editor — see the README's verification caveat on the audio-side
+    `ClippingConfiguration` change).
 10. Create a project, make an edit, background the app (Home button) without
     exporting, then kill the app from Recents → relaunch → open it from
     Home's "Projects" row or the Projects screen → confirm the edit is still

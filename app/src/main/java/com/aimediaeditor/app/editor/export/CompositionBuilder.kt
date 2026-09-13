@@ -26,6 +26,7 @@ import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
 import com.aimediaeditor.app.data.media.MediaType
 import com.aimediaeditor.app.editor.model.AudioTrack
+import com.aimediaeditor.app.editor.model.effectiveDurationMs
 import com.aimediaeditor.app.editor.model.FilterType
 import com.aimediaeditor.app.editor.model.FocalPoint
 import com.aimediaeditor.app.editor.model.computeCropWindow
@@ -297,13 +298,31 @@ object CompositionBuilder {
      *   -- Media3's own words, not a hedge added here.
      */
     private fun buildAudioSequence(track: AudioTrack, projectDurationMs: Long): EditedMediaItemSequence {
-        val durationUs = if (track.sourceDurationMs > 0L) {
-            track.sourceDurationMs * 1000L
-        } else {
-            projectDurationMs.coerceAtLeast(1000L) * 1000L
+        // effectiveDurationMs is the single source of truth for "how long does this
+        // track play" -- shared with the audio timeline strip's UI, so export can never
+        // disagree with what the user saw and dragged.
+        val effectiveDuration = track.effectiveDurationMs(projectDurationMs)
+        val mediaItemBuilder = MediaItem.Builder().setUri(Uri.parse(track.sourceUri))
+
+        // Actually clip the source to the user-trimmed length via ClippingConfiguration --
+        // the same mechanism buildVideoItem uses for video trims -- rather than relying on
+        // setDurationUs alone. setDurationUs is documented as a fallback for when a
+        // duration can't be read from the source itself (images, an unknown-length
+        // stream); for a real audio file Media3 can decode a length from, it's very
+        // unlikely to be treated as an active trim, so it can't be what shortens
+        // playback here. Only applied when there's an actual known source length to clip
+        // against and the user has trimmed shorter than it.
+        if (track.sourceDurationMs > 0L && effectiveDuration < track.sourceDurationMs) {
+            mediaItemBuilder.setClippingConfiguration(
+                MediaItem.ClippingConfiguration.Builder()
+                    .setStartPositionMs(0L)
+                    .setEndPositionMs(effectiveDuration)
+                    .build()
+            )
         }
-        val audioItemBuilder = EditedMediaItem.Builder(MediaItem.fromUri(Uri.parse(track.sourceUri)))
-            .setDurationUs(durationUs)
+
+        val audioItemBuilder = EditedMediaItem.Builder(mediaItemBuilder.build())
+            .setDurationUs(effectiveDuration * 1000L)
         if (track.volume != 1f) {
             audioItemBuilder.setEffects(
                 Effects(listOf(volumeProcessor(track.volume)), /* videoEffects= */ emptyList())

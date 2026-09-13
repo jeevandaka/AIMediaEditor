@@ -170,6 +170,7 @@ fun EditorScreen(
     var showTextDialog by remember { mutableStateOf(false) }
     var showAudioDialog by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
+    var selectedAudioTrackId by remember { mutableStateOf<String?>(null) }
     var exportRequestId by remember { mutableStateOf<UUID?>(null) }
     var exportBlockedMessage by remember { mutableStateOf<String?>(null) }
     val workManager = remember { WorkManager.getInstance(context) }
@@ -280,6 +281,20 @@ fun EditorScreen(
                     onReorder = { viewModel.onCommand(EditCommand.ReorderClips(it)) },
                     onTrimCommitted = { clipId, start, end ->
                         viewModel.onCommand(EditCommand.TrimClip(clipId, start, end))
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // Drag a track left/right to reposition it, drag its right edge to trim
+                // how long it plays -- see AudioTrackStrip for why this is a Box of
+                // absolutely-positioned blocks rather than a Row like the video clips above.
+                AudioTrackStrip(
+                    audioTracks = uiState.project.audioTracks,
+                    selectedTrackId = selectedAudioTrackId,
+                    projectDurationMs = uiState.project.durationMs,
+                    onSelect = { selectedAudioTrackId = it },
+                    onPositionCommitted = { trackId, start, duration ->
+                        viewModel.onCommand(EditCommand.SetAudioPosition(trackId, start, duration))
                     },
                     modifier = Modifier.fillMaxWidth()
                 )
