@@ -1,5 +1,7 @@
 package com.aimediaeditor.app.editor.model
 
+import com.aimediaeditor.app.data.media.MediaType
+
 /**
  * Architecture notes section 1.4's "validation gate": every command --
  * manual or AI-generated -- is clamped against the actual bounds of the
@@ -20,12 +22,24 @@ object ProjectSanitizer {
     private const val MIN_TEXT_DURATION_MS = 300L
     private const val MAX_TEXT_LENGTH = 280
     private const val MAX_VOLUME = 2f
+    private const val MIN_SPEED = 0.25f
+    private const val MAX_SPEED = 4f
 
     fun apply(state: ProjectState, command: EditCommand): ProjectState = when (command) {
 
         is EditCommand.TrimClip -> state.mapClip(command.clipId) { clip ->
-            val (start, end) = clampRange(command.startMs, command.endMs, clip.sourceDurationMs, MIN_CLIP_DURATION_MS)
-            clip.copy(trimStartMs = start, trimEndMs = end)
+            if (clip.sourceType == MediaType.IMAGE) {
+                // A still has no source timeline to seek into -- only its
+                // on-screen duration is meaningful. So for photos the two
+                // handles edit LENGTH, and the result is normalized to
+                // start at 0 rather than carrying a meaningless in-point.
+                val requested = (command.endMs - command.startMs)
+                    .coerceIn(MIN_CLIP_DURATION_MS, MAX_PHOTO_DURATION_MS)
+                clip.copy(trimStartMs = 0L, trimEndMs = requested)
+            } else {
+                val (start, end) = clampRange(command.startMs, command.endMs, clip.sourceDurationMs, MIN_CLIP_DURATION_MS)
+                clip.copy(trimStartMs = start, trimEndMs = end)
+            }
         }
 
         is EditCommand.SplitClip -> state.splitClip(command.clipId, command.splitAtMs)
@@ -77,9 +91,42 @@ object ProjectSanitizer {
                 id = newId("audio"),
                 sourceUri = command.sourceUri,
                 startMs = command.startMs.coerceIn(0, state.durationMs.coerceAtLeast(0)),
-                volume = command.volume.coerceIn(0f, MAX_VOLUME)
+                volume = command.volume.coerceIn(0f, MAX_VOLUME),
+                sourceDurationMs = command.sourceDurationMs
             )
         )
+
+        is EditCommand.SetSpeed -> state.mapClip(command.clipId) { clip ->
+            // Speed is meaningless on a still -- silently leave photos alone
+            // rather than storing a value nothing can act on.
+            if (clip.sourceType == MediaType.IMAGE) {
+                clip
+            } else {
+                clip.copy(speed = command.speed.coerceIn(MIN_SPEED, MAX_SPEED))
+            }
+        }
+
+        is EditCommand.SetClipVolume -> state.mapClip(command.clipId) {
+            it.copy(volume = command.volume.coerceIn(0f, MAX_VOLUME))
+        }
+
+        is EditCommand.SetAudioVolume -> state.copy(
+            audioTracks = state.audioTracks.map {
+                if (it.id == command.trackId) it.copy(volume = command.volume.coerceIn(0f, MAX_VOLUME)) else it
+            }
+        )
+
+        is EditCommand.SetAudioLooping -> state.copy(
+            audioTracks = state.audioTracks.map {
+                if (it.id == command.trackId) it.copy(isLooping = command.isLooping) else it
+            }
+        )
+
+        is EditCommand.RemoveTextOverlay ->
+            state.copy(textOverlays = state.textOverlays.filterNot { it.id == command.overlayId })
+
+        is EditCommand.RemoveAudioTrack ->
+            state.copy(audioTracks = state.audioTracks.filterNot { it.id == command.trackId })
     }
 
     private fun ProjectState.mapClip(clipId: String, transform: (VideoClip) -> VideoClip): ProjectState =

@@ -18,5 +18,20 @@ sealed interface EditCommand {
     data class ApplyFilter(val filter: FilterType, val clipId: String?) : EditCommand // null = whole project
     data class SmartReframe(val clipId: String, val focalPoint: FocalPoint) : EditCommand
     data class AddText(val text: String, val startMs: Long, val endMs: Long, val yPositionFraction: Float) : EditCommand
-    data class AddAudio(val sourceUri: String, val startMs: Long, val volume: Float) : EditCommand
+    data class AddAudio(val sourceUri: String, val startMs: Long, val volume: Float, val sourceDurationMs: Long = 0L) : EditCommand
+    // Added this round: speed was already a field on VideoClip from Phase 2,
+    // but nothing could change it. It belongs in the taxonomy like any other
+    // edit, so it goes through the same validation gate.
+    data class SetSpeed(val clipId: String, val speed: Float) : EditCommand
+    // Also added this round: VideoClip.volume and AudioTrack.volume have been
+    // in the EDL since Phase 2 with nothing able to change them, and nothing
+    // applying them either. Both ends are wired up now.
+    data class SetClipVolume(val clipId: String, val volume: Float) : EditCommand
+    data class SetAudioVolume(val trackId: String, val volume: Float) : EditCommand
+    data class SetAudioLooping(val trackId: String, val isLooping: Boolean) : EditCommand
+    // Added in Phase 2: undo() can already reverse the most recent add, but a user
+    // removing one specific earlier text/audio item shouldn't have to undo everything
+    // that came after it too.
+    data class RemoveTextOverlay(val overlayId: String) : EditCommand
+    data class RemoveAudioTrack(val trackId: String) : EditCommand
 }
