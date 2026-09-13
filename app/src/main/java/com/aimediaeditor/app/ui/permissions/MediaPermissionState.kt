@@ -22,6 +22,7 @@ import androidx.core.content.ContextCompat
 data class MediaPermissionState(
     val hasFullAccess: Boolean,
     val hasPartialAccess: Boolean,
+    val hasAudioAccess: Boolean,
     val request: () -> Unit
 ) {
     val isGranted: Boolean get() = hasFullAccess || hasPartialAccess
@@ -31,12 +32,15 @@ private fun requiredPermissions(): Array<String> = when {
     Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> arrayOf(
         Manifest.permission.READ_MEDIA_IMAGES,
         Manifest.permission.READ_MEDIA_VIDEO,
-        Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
+        Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED,
+        Manifest.permission.READ_MEDIA_AUDIO
     )
     Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
         Manifest.permission.READ_MEDIA_IMAGES,
-        Manifest.permission.READ_MEDIA_VIDEO
+        Manifest.permission.READ_MEDIA_VIDEO,
+        Manifest.permission.READ_MEDIA_AUDIO
     )
+    // Pre-33: one blanket permission covers images, video, and audio alike.
     else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
 }
 
@@ -60,10 +64,13 @@ fun rememberMediaPermissionState(): MediaPermissionState {
     val hasFullAccess = granted.contains(Manifest.permission.READ_MEDIA_IMAGES) ||
         granted.contains(Manifest.permission.READ_EXTERNAL_STORAGE)
     val hasPartialAccess = granted.contains(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
+    val hasAudioAccess = granted.contains(Manifest.permission.READ_MEDIA_AUDIO) ||
+        granted.contains(Manifest.permission.READ_EXTERNAL_STORAGE)
 
     return MediaPermissionState(
         hasFullAccess = hasFullAccess,
         hasPartialAccess = hasPartialAccess,
+        hasAudioAccess = hasAudioAccess,
         request = { launcher.launch(permissions) }
     )
 }

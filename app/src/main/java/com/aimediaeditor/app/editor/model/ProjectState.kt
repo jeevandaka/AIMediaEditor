@@ -1,5 +1,7 @@
 package com.aimediaeditor.app.editor.model
 
+import com.aimediaeditor.app.data.media.MediaType
+
 /**
  * The full, serializable state of an editing project -- the "Edit
  * Decision List" from architecture notes section 1. This is the ONLY
@@ -44,10 +46,32 @@ data class VideoClip(
     val speed: Float = 1f,
     val volume: Float = 1f,
     val filter: FilterType = FilterType.NONE,
-    val focalPoint: FocalPoint? = null // Smart Reframe target, spec section 12
+    val focalPoint: FocalPoint? = null, // Smart Reframe target, spec section 12 -- also doubles as the manual crop/reframe anchor in the Phase 2 editor UI
+    // Added in Phase 2, all defaulted so nothing that already constructs a VideoClip breaks.
+    // "VideoClip" keeps the spec's section-17 name even though it can hold a still image
+    // placed on the timeline -- see sourceType.
+    val sourceType: MediaType = MediaType.VIDEO,
+    val sourceWidth: Int = 1920,
+    val sourceHeight: Int = 1080
 ) {
     val durationMs: Long get() = ((trimEndMs - trimStartMs) / speed).toLong()
 }
+
+/**
+ * Longest a single still image may be shown for. A photo has no intrinsic
+ * length, so something has to bound it; 30s is well beyond any sensible
+ * single-photo shot while still stopping a runaway drag.
+ */
+const val MAX_PHOTO_DURATION_MS = 30_000L
+
+/**
+ * Upper bound that both the sanitizer and the timeline's drag handles clamp
+ * trimEndMs against. A video cannot extend past its own source length; a
+ * still has no source length, so it gets the cap above instead. Defined
+ * once here so the validation gate and the UI can never disagree about it.
+ */
+val VideoClip.maxTrimEndMs: Long
+    get() = if (sourceType == MediaType.IMAGE) MAX_PHOTO_DURATION_MS else sourceDurationMs
 
 /** Normalized 0f..1f position within the frame -- resolution-independent. */
 data class FocalPoint(val x: Float, val y: Float)
@@ -58,7 +82,11 @@ data class AudioTrack(
     val id: String,
     val sourceUri: String,
     val startMs: Long,
-    val volume: Float = 1f
+    val volume: Float = 1f,
+    val sourceDurationMs: Long = 0L,
+    // Added this round: a track shorter than the video used to simply stop.
+    // Looping repeats it for the remaining length of the visual sequence.
+    val isLooping: Boolean = false
 )
 
 data class TextOverlay(

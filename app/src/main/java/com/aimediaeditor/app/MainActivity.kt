@@ -7,7 +7,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
-import com.aimediaeditor.app.ui.home.HomeScreen
+import com.aimediaeditor.app.ui.nav.AppNavGraph
 import com.aimediaeditor.app.ui.theme.AIMediaEditorTheme
 
 class MainActivity : ComponentActivity() {
@@ -17,7 +17,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             AIMediaEditorTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    HomeScreen()
+                    AppNavGraph()
                 }
             }
         }
