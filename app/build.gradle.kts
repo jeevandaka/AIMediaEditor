@@ -60,11 +60,11 @@ dependencies {
     implementation(libs.media3.effect)
     implementation(libs.work.runtime.ktx)
     implementation(libs.kotlinx.serialization.json)
-    // EncryptedSharedPreferences -- the README's own stated plan for the API key is
-    // "a securely-stored key (never bundled into the APK)"; this is the standard,
-    // Google-recommended way to do that on Android rather than hand-rolling AES/
-    // Keystore wiring, which is a much worse risk to get subtly wrong than adding
-    // one well-known first-party library.
+    // EncryptedSharedPreferences -- used by ModelAccessTokenStore for the Hugging Face
+    // token that authenticates the ONE-TIME on-device model download (see
+    // LocalLlmModelManager). The standard, Google-recommended way to store a secret on
+    // Android rather than hand-rolling AES/Keystore wiring, which is a much worse risk
+    // to get subtly wrong than adding one well-known first-party library.
     implementation(libs.androidx.security.crypto)
 
     // Media index (spec sections 5/6/20): a local, on-device database of what's IN the
@@ -79,6 +79,13 @@ dependencies {
     // no network call, no cloud upload, matching spec section 15's privacy principle.
     implementation(libs.mlkit.image.labeling)
     implementation(libs.mlkit.face.detection)
+    // The on-device LLM runtime (Gemma, via LocalLlmEngine) that both AI features --
+    // edit-command prompts and AI library search -- run on. Matches spec section 15's
+    // privacy principle even more directly than ML Kit above: the whole AI layer was
+    // originally built against Anthropic's cloud API (still in this project's git
+    // history), then moved fully on-device this round specifically so no project data,
+    // prompt, or search query is ever sent off the device -- see the README.
+    implementation(libs.mediapipe.tasks.genai)
 
     debugImplementation(libs.androidx.ui.tooling)
 

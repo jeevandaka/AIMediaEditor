@@ -24,6 +24,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -33,11 +34,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil3.compose.AsyncImage
 import com.aimediaeditor.app.data.media.MediaItem
 import com.aimediaeditor.app.data.media.MediaType
+import com.aimediaeditor.app.data.settings.ModelAccessTokenStore
+import com.aimediaeditor.app.ui.settings.ModelDownloadDialog
 
 /**
  * Spec section 3's "AI Search" entry, section 5's example queries ("Find pictures from
@@ -54,9 +58,15 @@ fun MediaSearchScreen(
     onCreateProject: (List<MediaItem>) -> Unit,
     viewModel: MediaSearchViewModel = viewModel()
 ) {
+    val context = LocalContext.current
+    val tokenStore = remember { ModelAccessTokenStore(context) }
     var query by remember { mutableStateOf("") }
     val uiState by viewModel.uiState.collectAsState()
+    val modelState by viewModel.modelState.collectAsState()
     var selectedIds by remember { mutableStateOf(setOf<Long>()) }
+    var showModelDownloadDialog by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) { viewModel.refreshModelReady() }
 
     Scaffold(
         topBar = {
@@ -74,6 +84,18 @@ fun MediaSearchScreen(
                 actions = {
                     TextButton(onClick = { viewModel.search(query) }, enabled = query.isNotBlank()) {
                         Text("Search")
+                    }
+                    // "Stage 2" -- runs the same query through the on-device model
+                    // (MediaSearchViewModel.aiSearch) instead of Stage 1's keyword
+                    // matching, once the model is downloaded; before that, the same
+                    // button opens the download flow instead of searching.
+                    TextButton(
+                        onClick = {
+                            if (modelState.isReady) viewModel.aiSearch(query) else showModelDownloadDialog = true
+                        },
+                        enabled = query.isNotBlank() || !modelState.isReady
+                    ) {
+                        Text(if (modelState.isReady) "AI Search" else "AI Search (setup)")
                     }
                 }
             )
@@ -99,8 +121,9 @@ fun MediaSearchScreen(
                 is SearchUiState.Results -> {
                     if (state.items.isEmpty()) {
                         Text(
-                            "No matches for “${state.query}” yet — indexing may " +
-                                "still be catching up in the background, or try a different phrase.",
+                            state.assistantMessage
+                                ?: "No matches for “${state.query}” yet — indexing may " +
+                                    "still be catching up in the background, or try a different phrase.",
                             modifier = Modifier.align(Alignment.Center).padding(24.dp)
                         )
                     } else {
@@ -113,6 +136,21 @@ fun MediaSearchScreen(
                 }
             }
         }
+    }
+
+    if (showModelDownloadDialog) {
+        ModelDownloadDialog(
+            isModelReady = modelState.isReady,
+            isDownloading = modelState.isDownloading,
+            progress = modelState.progress,
+            error = modelState.error,
+            initialToken = tokenStore.getToken().orEmpty(),
+            onDismiss = { showModelDownloadDialog = false },
+            onDownload = { token ->
+                tokenStore.setToken(token)
+                viewModel.downloadModel(token)
+            }
+        )
     }
 }
 

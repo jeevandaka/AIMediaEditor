@@ -19,9 +19,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Phase 4: the AI layer's one network call, to api.anthropic.com only
-         (ClaudeEditService) -- without this, the OS blocks outbound sockets for this
-         app entirely, regardless of anything the app-level code does right. -->
+    <!-- The app's ONE network use: a one-time download of the on-device Gemma model
+         file from huggingface.co (LocalLlmModelManager). Every AI feature (edit
+         prompts, AI search) runs fully offline once that download completes -- no
+         project data, search query, or media metadata is ever sent anywhere. Without
+         this permission the OS blocks outbound sockets for this app entirely,
+         regardless of anything the app-level code does right, so even that one-time
+         download couldn't happen. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Media indexing (spec sections 5/6): READ_MEDIA_IMAGES/VIDEO above only grant
          access to the files themselves -- GPS coordinates embedded in a photo's EXIF

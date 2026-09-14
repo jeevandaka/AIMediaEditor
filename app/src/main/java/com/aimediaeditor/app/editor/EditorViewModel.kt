@@ -6,7 +6,8 @@ import androidx.lifecycle.viewModelScope
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import com.aimediaeditor.app.ai.AiEditResult
-import com.aimediaeditor.app.ai.ClaudeEditService
+import com.aimediaeditor.app.ai.LocalEditCommandService
+import com.aimediaeditor.app.ai.LocalLlmModelManager
 import com.aimediaeditor.app.data.media.AudioItem
 import com.aimediaeditor.app.data.media.AudioRepository
 import com.aimediaeditor.app.data.media.MediaItem
@@ -38,12 +39,19 @@ data class EditorUiState(
     val isLoading: Boolean = false,
     val availableAudio: List<AudioItem> = emptyList(),
     val isAiLoading: Boolean = false,
-    // Set after a request completes -- the assistant's own text explanation (present
-    // whether or not it actually called the edit tool) and/or a request-level failure
-    // message (network error, bad API key, malformed response). Cleared by the caller
-    // once shown; see EditorViewModel.clearAiFeedback.
+    // Set after a request completes -- a fallback note when the local model's response
+    // didn't contain a recognizable JSON array, and/or a request-level failure message
+    // (model failed to load, generation threw). Cleared by the caller once shown; see
+    // EditorViewModel.clearAiFeedback.
     val aiMessage: String? = null,
-    val aiError: String? = null
+    val aiError: String? = null,
+    // On-device model readiness -- see LocalLlmModelManager. isModelDownloading and
+    // modelDownloadProgress (0f..1f, null while the server hasn't reported a total
+    // size yet) only matter while a download is in flight.
+    val isModelReady: Boolean = false,
+    val isModelDownloading: Boolean = false,
+    val modelDownloadProgress: Float? = null,
+    val modelDownloadError: String? = null
 )
 
 /** How long to let rapid edits (e.g. a trim drag) settle before writing to disk. */
@@ -58,6 +66,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     private val audioRepository = AudioRepository(application)
     private val projectRepository = ProjectRepository(application)
+    private val modelManager = LocalLlmModelManager(application)
     private var history: ProjectHistory? = null
     private var initialized = false
     private var createdAtMs = System.currentTimeMillis()
@@ -135,21 +144,27 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
-     * Sends [prompt] to Claude alongside the current project's state, then applies
-     * every [EditCommand] it comes back with through the SAME [ProjectHistory] ->
-     * [com.aimediaeditor.app.editor.model.ProjectSanitizer] path every manual edit
-     * goes through -- the AI layer never touches [ProjectState] directly (architecture
-     * notes section 7). Multiple commands from one response are applied as a single
-     * history step's worth of state updates (one [syncFromHistory] call at the end,
-     * not one per command), so a multi-command AI edit doesn't flash through
-     * intermediate states on screen.
+     * Sends [prompt] to the on-device model alongside the current project's state,
+     * then applies every [EditCommand] it comes back with through the SAME
+     * [ProjectHistory] -> [com.aimediaeditor.app.editor.model.ProjectSanitizer] path
+     * every manual edit goes through -- the AI layer never touches [ProjectState]
+     * directly (architecture notes section 7), regardless of whether the commands
+     * came from a cloud call (the original design) or local inference (this round).
+     * Multiple commands from one response are applied as a single history step's
+     * worth of state updates (one [syncFromHistory] call at the end, not one per
+     * command), so a multi-command AI edit doesn't flash through intermediate states
+     * on screen.
      */
-    fun submitAiPrompt(apiKey: String, prompt: String) {
+    fun submitAiPrompt(prompt: String) {
         val h = history ?: return
         if (_uiState.value.isAiLoading) return // one request in flight at a time
+        if (!modelManager.isModelReady()) return
         _uiState.value = _uiState.value.copy(isAiLoading = true, aiMessage = null, aiError = null)
         viewModelScope.launch {
-            when (val result = ClaudeEditService.requestEdit(apiKey, h.current, prompt)) {
+            val result = LocalEditCommandService.requestEdit(
+                getApplication(), modelManager.modelFilePath(), h.current, prompt
+            )
+            when (result) {
                 is AiEditResult.Success -> {
                     result.commands.forEach { h.apply(it) }
                     syncFromHistory(h)
@@ -164,6 +179,33 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun clearAiFeedback() {
         _uiState.value = _uiState.value.copy(aiMessage = null, aiError = null)
+    }
+
+    /** Safe to call every time EditorScreen enters composition -- cheap local file check. */
+    fun refreshModelReady() {
+        _uiState.value = _uiState.value.copy(isModelReady = modelManager.isModelReady())
+    }
+
+    /**
+     * Downloads the on-device model using the user's own Hugging Face token (see
+     * [LocalLlmModelManager]'s doc comment for why one is needed -- the model repo is
+     * gated behind the Gemma license). This is the app's only network call; once it
+     * succeeds, [submitAiPrompt] and every other AI feature run fully offline.
+     */
+    fun downloadModel(hfToken: String) {
+        if (_uiState.value.isModelDownloading) return
+        _uiState.value = _uiState.value.copy(isModelDownloading = true, modelDownloadProgress = null, modelDownloadError = null)
+        viewModelScope.launch {
+            val result = modelManager.downloadModel(hfToken) { downloaded, total ->
+                val progress = if (total > 0) downloaded.toFloat() / total.toFloat() else null
+                _uiState.value = _uiState.value.copy(modelDownloadProgress = progress)
+            }
+            _uiState.value = _uiState.value.copy(
+                isModelDownloading = false,
+                isModelReady = modelManager.isModelReady(),
+                modelDownloadError = result.exceptionOrNull()?.message
+            )
+        }
     }
 
     /**

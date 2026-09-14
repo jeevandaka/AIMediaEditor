@@ -1,6 +1,8 @@
 package com.aimediaeditor.app.data.index
 
 import android.content.Context
+import com.aimediaeditor.app.ai.AiMediaSelectionResult
+import com.aimediaeditor.app.ai.LocalMediaSelectionService
 import com.aimediaeditor.app.data.media.MediaItem
 import com.aimediaeditor.app.data.media.MediaType
 import kotlinx.coroutines.Dispatchers
@@ -15,6 +17,11 @@ class MediaIndexRepository(context: Context) {
 
     private val dao = AppDatabase.get(context).mediaIndexDao()
     private val analyzer = MediaAnalyzer(context.applicationContext)
+
+    private companion object {
+        // Bounds the on-device model's prompt length -- see aiSearch()'s doc comment.
+        const val MAX_CANDIDATES = 150
+    }
 
     /**
      * Analyzes and stores every item in [allMedia] not already indexed, then removes
@@ -47,6 +54,50 @@ class MediaIndexRepository(context: Context) {
     }
 
     suspend fun search(query: String): List<MediaItem> = withContext(Dispatchers.IO) {
+        val (mediaRows, summaries) = loadIndexAsSummaries()
+        val matchedIds = MediaSearchQuery.search(summaries, query, System.currentTimeMillis()).map { it.mediaId }
+        val rowsById = mediaRows.associateBy { it.mediaId }
+        // Preserve MediaSearchQuery's own ordering (quality- or recency-sorted), not
+        // whatever order Room happened to return rows in.
+        matchedIds.mapNotNull { id -> rowsById[id]?.let { it.toMediaItem() } }
+    }
+
+    /**
+     * "Stage 2" of the search chain: the same deterministic Stage 1 matching [search]
+     * uses, but as a RECALL pass feeding a bounded candidate list to the on-device
+     * model ([LocalMediaSelectionService]) for ranking/selection with real natural-
+     * language judgement, instead of Stage 1's own keyword/date-phrase result being
+     * the final answer. Falls back to the [MAX_CANDIDATES] most recent items when
+     * Stage 1 finds nothing at all (a phrasing its deterministic parser doesn't
+     * recognize shouldn't also blind Stage 2, which doesn't depend on that parser).
+     *
+     * [modelFilePath] comes from [com.aimediaeditor.app.ai.LocalLlmModelManager] --
+     * the caller is responsible for confirming the model is actually downloaded
+     * first; this doesn't check.
+     */
+    suspend fun aiSearch(context: Context, modelFilePath: String, query: String): AiSearchOutcome =
+        withContext(Dispatchers.IO) {
+            val (mediaRows, summaries) = loadIndexAsSummaries()
+            if (summaries.isEmpty()) {
+                return@withContext AiSearchOutcome.Failure(
+                    "Your media library hasn't finished indexing yet -- try again in a moment."
+                )
+            }
+            val deterministic = MediaSearchQuery.search(summaries, query, System.currentTimeMillis())
+            val candidates = (deterministic.ifEmpty { summaries.sortedByDescending { it.dateAddedSeconds } })
+                .take(MAX_CANDIDATES)
+
+            when (val result = LocalMediaSelectionService.requestSelection(context, modelFilePath, candidates, query)) {
+                is AiMediaSelectionResult.Success -> {
+                    val rowsById = mediaRows.associateBy { it.mediaId }
+                    val items = result.mediaIds.mapNotNull { id -> rowsById[id]?.let { it.toMediaItem() } }
+                    AiSearchOutcome.Success(items, result.assistantMessage)
+                }
+                is AiMediaSelectionResult.Failure -> AiSearchOutcome.Failure(result.message)
+            }
+        }
+
+    private suspend fun loadIndexAsSummaries(): Pair<List<MediaIndexEntity>, List<IndexedMediaSummary>> {
         val mediaRows = dao.getAllMedia()
         val labelsByMediaId = dao.getAllLabels().groupBy({ it.mediaId }, { it.label })
         val summaries = mediaRows.map { row ->
@@ -62,11 +113,7 @@ class MediaIndexRepository(context: Context) {
                 qualityScore = row.qualityScore
             )
         }
-        val matchedIds = MediaSearchQuery.search(summaries, query, System.currentTimeMillis()).map { it.mediaId }
-        val rowsById = mediaRows.associateBy { it.mediaId }
-        // Preserve MediaSearchQuery's own ordering (quality- or recency-sorted), not
-        // whatever order Room happened to return rows in.
-        matchedIds.mapNotNull { id -> rowsById[id]?.let { it.toMediaItem() } }
+        return mediaRows to summaries
     }
 
     private fun MediaIndexEntity.toMediaItem() = MediaItem(
@@ -80,4 +127,10 @@ class MediaIndexRepository(context: Context) {
         mimeType = mimeType,
         type = if (mediaType == MediaType.VIDEO.name) MediaType.VIDEO else MediaType.IMAGE
     )
+}
+
+/** Outcome of one [MediaIndexRepository.aiSearch] call. */
+sealed interface AiSearchOutcome {
+    data class Success(val items: List<MediaItem>, val assistantMessage: String?) : AiSearchOutcome
+    data class Failure(val message: String) : AiSearchOutcome
 }

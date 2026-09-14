@@ -14,10 +14,16 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 
 /**
- * The Anthropic Messages API "tool" definition for `apply_edit_commands` -- the ONLY
- * way this app lets an LLM affect a project (architecture notes section 7, spec
- * section 21). `tool_choice` is forced to this exact tool by [ClaudeEditService], so
- * the model's response is always this shape, never free-form text to regex-parse.
+ * The JSON Schema for an `EditCommand` -- the ONLY way this app lets an LLM affect a
+ * project (architecture notes section 7, spec section 21). Originally written as an
+ * Anthropic Messages API "tool" definition with `tool_choice` forced to it, which
+ * structurally guaranteed a matching response; now that the AI layer runs fully
+ * on-device (see [LocalEditCommandService]), there is no tool-calling mechanism to
+ * force a shape -- [toolDefinition] instead gets embedded as reference documentation
+ * inside [buildFullPrompt], and the model is asked in plain instructions to respond
+ * with a bare JSON array matching it. [LlmJsonExtractor] and [EditCommandParser]'s
+ * existing defensive parsing are what actually keep that promise now that nothing
+ * structurally enforces it.
  *
  * One JSON Schema `oneOf` branch per [com.aimediaeditor.app.editor.model.EditCommand]
  * case, discriminated by a `type` string const matching the Kotlin class's simple
@@ -316,25 +322,59 @@ object EditCommandToolSchema {
         }
     }
 
-    /** System prompt: the app's editing model, in the model's own words, not the user's. */
+    /**
+     * The app's editing model, in the model's own words, not the user's. Rewritten this
+     * round for a local, non-tool-calling model: the ORIGINAL version (kept in this
+     * project's git history) told the model to call an Anthropic tool named
+     * $TOOL_NAME; a small on-device model has no such mechanism, so this instead asks
+     * for a bare JSON array directly in its text response, matching the schema
+     * embedded by [buildFullPrompt]. This is a REAL, honest capability reduction, not
+     * just a wording change -- Claude's `tool_choice` structurally guaranteed a
+     * matching response; nothing here does, which is why [LlmJsonExtractor] and
+     * [EditCommandParser]'s defensive parsing now carry more of the actual weight of
+     * "never let malformed AI output reach [com.aimediaeditor.app.editor.model.ProjectSanitizer]."
+     */
     fun systemPrompt(): String = """
-        You are the editing assistant inside a mobile video editor app. The user describes
-        an edit in plain language; you translate it into calls to the $TOOL_NAME tool.
+        You are the editing assistant inside a mobile video editor app that runs
+        entirely on this device. The user describes an edit in plain language; you
+        translate it into a JSON array of edit commands.
 
         Rules:
-        - You can ONLY affect the project by calling $TOOL_NAME. You never produce any
-          other kind of output, and you never execute code or touch files directly.
-        - Every command must reference a real id from the project summary you're given --
-          never invent a clip, text overlay, or audio track id.
+        - Respond with ONLY a single JSON array -- no other text, no markdown code
+          fences, nothing before or after it. If there is nothing to do, respond with
+          exactly [].
+        - Each array element must be a JSON object matching one of the command shapes
+          given below, with a "type" field naming which one exactly.
+        - Every command must reference a real id from the project summary you're given
+          -- never invent a clip, text overlay, or audio track id.
         - All timestamps are in MILLISECONDS. Read carefully whether a field wants a
-          timestamp on the PROJECT timeline (the whole edited sequence) or in SOURCE time
-          (a position inside one clip's own original file) -- they are not the same
-          number line, and the tool description for each field says which one it means.
-        - If the request is ambiguous or can't be done with the available commands, make
-          the most reasonable interpretation you can and explain briefly what you did (or
-          didn't do) in your text response alongside the tool call.
-        - You cannot add new video, photo, or audio source material to the project -- only
-          edit what's already there. If the user asks to add new media, say so instead of
-          calling the tool.
+          timestamp on the PROJECT timeline (the whole edited sequence) or in SOURCE
+          time (a position inside one clip's own original file) -- they are not the
+          same number line, and each field's description below says which one it means.
+        - You cannot add new video, photo, or audio source material to the project --
+          only edit what's already there.
+        - If the request is ambiguous or can't be done with the available commands,
+          respond with [] rather than guessing -- there is no way to explain why in
+          this response format, so doing nothing is safer than a wrong edit.
     """.trimIndent()
+
+    /**
+     * Assembles one flat prompt string for [LocalLlmEngine.generate] -- local models
+     * (unlike the Anthropic Messages API) take a single text prompt, not a separate
+     * system/user message split, so this concatenates the instructions, the command
+     * schema (embedded as reference JSON, not sent as a real "tool" anywhere), the
+     * current project, and the user's own request into one string.
+     */
+    fun buildFullPrompt(project: ProjectState, userPrompt: String): String = buildString {
+        appendLine(systemPrompt())
+        appendLine()
+        appendLine("Command shapes you may use (reference schema -- respond with an array")
+        appendLine("of objects shaped like these, never with this schema itself):")
+        appendLine(toolDefinition().toString())
+        appendLine()
+        appendLine("Current project:")
+        append(describeProject(project))
+        appendLine()
+        appendLine("User request: $userPrompt")
+    }
 }

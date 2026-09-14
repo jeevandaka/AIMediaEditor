@@ -1,28 +1,33 @@
-# AI Media Editor — Phase 1–5: media browser, manual editor, real export, persistence, AI edit layer, media indexing/search
+# AI Media Editor — Phase 1–5: media browser, manual editor, real export, persistence, fully on-device AI, media indexing/search
 
 Status: **manual editor + real Media3 export pipeline (device-verified) +
 project persistence/autosave (JVM-verified) + several real-device bug fixes
 + a draggable audio timeline + a timeline playhead and zoom + audio
 snapping + on-canvas text positioning + real audio waveforms + a
-reorderable multi-effect stack + a checked-in JUnit test suite + a first
-slice of the AI layer (natural-language prompt → `EditCommand`s, via the
-Anthropic API — see "AI layer (Phase 4)" below, entirely unverified
-against the live API from this sandbox) + on-device media indexing and
-deterministic natural-language search (Room + ML Kit + EXIF/GPS, see
-"Media indexing/search (Phase 5, stage 1)" below — this is stage 1 of the
-user's own stated chain "Media indexing/search → AI library selection →
-AI first-cut assembly → polished killer workflow"; stages 2–4 are not
-started).** Fade-to-black transitions between clips have a working
+reorderable multi-effect stack + a checked-in JUnit test suite + an AI
+layer that now runs ENTIRELY ON-DEVICE (natural-language prompt →
+`EditCommand`s, and natural-language library search, both via a locally
+run Gemma model through MediaPipe — see "On-device AI" below; this
+replaced an earlier cloud-API (Anthropic) design before that design was
+ever shipped or tested, specifically so no project data or search query
+is ever sent off the device) + on-device media indexing and two-stage
+natural-language search (Room + ML Kit + EXIF/GPS for the deterministic
+"Stage 1" layer, the same local Gemma model for a judgement-based "Stage
+2" layer — see "Media indexing/search" below). Together these two rounds
+complete the user's own stated chain: "Media indexing/search → AI library
+selection → AI first-cut assembly → polished killer workflow" through
+stage 2; stages 3–4 (first-cut assembly, the polished killer workflow)
+are not started.** Fade-to-black transitions between clips have a working
 timeline toggle and data model but currently render nothing — a
 real-device test outside this sandbox found the rendering approach broken
 and reverted it directly against this repository (see item 11 under
-"What's actually here"). Still missing: LLM-based ("Stage 2") query
-understanding for search, any AI photo tools, working transition
-rendering, and a real device pass on the AI layer AND the new indexing/
-search code (entirely unverified from this sandbox — first-ever Room and
-ML Kit usage in this project). See "What's not here yet" for exactly
-what's missing, and "What's verified vs. not" for which parts of the last
-few rounds have actually been run.
+"What's actually here"). Still missing: AI first-cut assembly (stage 3),
+any AI photo tools, working transition rendering, and a real device pass
+on EVERYTHING AI-related (the entire on-device model integration is
+first-ever, unverified from this sandbox — no Android SDK, device, or
+emulator here to load a native model into). See "What's not here yet"
+for exactly what's missing, and "What's verified vs. not" for which parts
+of the last few rounds have actually been run.
 
 ## Adopting the "World-Class Video Editor" UX spec
 
@@ -534,82 +539,119 @@ covering everything in that package except `TimelinePositions.kt`
 transition tests above — that a dedicated suite wasn't judged worth
 adding this round).
 
-## AI layer (Phase 4) — first slice
+## AI layer (Phase 4) — now fully on-device
 
 Everything above this section is Phase 1–3: a real, hardened manual editor
-with no AI in it at all. This round is the first piece of Phase 4 — the
-layer spec sections 4–9/21 and architecture notes section 7 describe: an
-LLM that turns a typed prompt into `EditCommand`s, which then go through
-the exact same `ProjectSanitizer` validation gate every manual edit
-already does. The architectural promise this was always building toward
-("AI never executes anything directly, only ever produces a command from
-the closed taxonomy") is now real, not just a comment on `EditCommand.kt`
-describing a future state.
+with no AI in it at all. Phase 4 is the layer spec sections 4–9/21 and
+architecture notes section 7 describe: an LLM that turns a typed prompt
+into `EditCommand`s, which then go through the exact same
+`ProjectSanitizer` validation gate every manual edit already does. The
+architectural promise this was always building toward ("AI never executes
+anything directly, only ever produces a command from the closed
+taxonomy") is real, not just a comment on `EditCommand.kt` describing a
+future state — and, as of this round, it runs entirely on the device.
 
-**1. `EditCommandToolSchema` + `EditCommandParser`** (`ai/` package) — the
-translation layer between untrusted LLM output and the app's real command
-types, and the single highest-stakes new code this session added: a bug
-here means an AI edit silently does the wrong thing, with nothing on
-screen to make that obviously visible the way a broken gesture would be.
-`EditCommandToolSchema.toolDefinition()` builds the Anthropic Messages API
-"tool" definition — one JSON Schema `oneOf` branch per `EditCommand` case,
-by hand, kept in sync with `EditCommand.kt` with no compiler-enforced link
-between the two (hence the test coverage below). `EditCommand.AddAudio` is
-the one deliberate exclusion: it needs a real `content://` URI to a file
-already on the device, which the model has no way to know since it only
-ever sees the text project summary `describeProject()` builds, never the
-device's media library. Every other command operates on an id (a clip,
-text overlay, or audio track) the model CAN see in that summary.
-`EditCommandParser.parse()` reads Claude's tool-call JSON back into real
-`EditCommand`s — defensively, field by field: a missing field, a
+### The pivot: cloud API → fully on-device
+
+Phase 4 was originally built (and documented in this README, and in this
+project's git history) against Anthropic's cloud Messages API: the user
+would paste their own Anthropic API key, and each AI request left the
+device as an HTTPS call to `api.anthropic.com`. That version was never
+shipped, never tested against the live API, and never used from a real
+device — the very next round, before any of that happened, the decision
+was made to move the entire AI layer on-device instead, specifically so
+no project data, edit prompt, or media-library search query is EVER sent
+anywhere. This is a genuine redesign, not a regression from a working
+cloud version to a worse local one: the cloud version's own README section
+always carried the "entirely unverified against the live API" caveat, so
+nothing working was thrown away.
+
+Concretely, `ClaudeEditService` (the HTTP call) and `ApiKeyStore` (the
+Anthropic key) are gone; `EditCommandToolSchema`/`EditCommandParser`
+(the actual command taxonomy and its defensive parsing) are UNCHANGED --
+that part of the architecture never depended on which model produces the
+commands. In their place:
+
+**1. `LocalLlmEngine`** (`ai/` package) — a thin wrapper around
+MediaPipe's `LlmInference` (`com.google.mediapipe:tasks-genai`), Google's
+on-device runtime for running a small open LLM (Gemma) directly on the
+phone's CPU/GPU. Implemented as a singleton (MediaPipe's own guidance,
+confirmed via web search from this sandbox — see "What's verified vs.
+not" for exactly what could and couldn't be confirmed this way): a
+multi-hundred-megabyte model has no business being loaded twice into a
+phone's RAM at once, so every AI feature in this app shares one loaded
+instance. `generate(context, modelFilePath, prompt): String` is the
+entire interface every caller sees — as far as `LocalEditCommandService`
+and `LocalMediaSelectionService` are concerned, this is a drop-in
+replacement for what used to be an `HttpURLConnection` call.
+
+**2. `LocalLlmModelManager`** (`ai/` package) — downloads and caches the
+model file (MediaPipe's `.task` format) to app-private storage. This is
+now the app's ONLY network call, and it's a one-time thing: once it
+succeeds, every AI feature runs fully offline from then on. The model
+repository is GATED on Hugging Face (Google requires accepting the Gemma
+license and being signed in before any file in it can be downloaded), so
+there's no anonymous public URL to hit — this needs the user's own
+Hugging Face access token, the exact same "bring your own credential,
+stored via `EncryptedSharedPreferences`, never bundled into the APK"
+pattern the old Anthropic key flow used (now `ModelAccessTokenStore`,
+`data/settings/`), except this token is used ONLY for the download's
+Authorization header, never touched again once the model file exists on
+disk.
+
+**3. `EditCommandToolSchema` + `EditCommandParser` + `LlmJsonExtractor`**
+(`ai/` package) — the translation layer between untrusted LLM output and
+the app's real command types, and still the single highest-stakes code in
+this app: a bug here means an AI edit silently does the wrong thing, with
+nothing on screen to make that obviously visible the way a broken gesture
+would be. `EditCommandToolSchema`'s JSON Schema generation
+(`toolDefinition()`) is UNCHANGED from the cloud version — one `oneOf`
+branch per `EditCommand` case, kept in sync with `EditCommand.kt` by
+hand, `AddAudio` deliberately excluded (it needs a real `content://` URI
+the model has no way to know). What changed is how that schema is USED:
+the cloud version sent it as an Anthropic `tools` parameter with
+`tool_choice` forced, which STRUCTURALLY guaranteed a matching JSON
+response; a local model has no such mechanism, so `buildFullPrompt()`
+instead embeds the schema as reference text inside one flat prompt, and
+asks the model in plain instructions to respond with a bare JSON array
+matching it. `LlmJsonExtractor` is the new belt-and-suspenders layer this
+requires: local models sometimes wrap their JSON in a markdown code fence
+or a sentence of commentary despite being asked not to, so this finds and
+extracts the array (first `[` to last `]`, then a real JSON parse) before
+handing it to `EditCommandParser.parse()`, which is UNCHANGED and still
+does the actual defensive, field-by-field parsing (a missing field, a
 wrong-typed value, or an unrecognized enum/command name drops that ONE
-command silently rather than throwing or smuggling a garbage value into a
-constructed `EditCommand`. This is a stricter, earlier gate than
-`ProjectSanitizer`'s own "never trust the caller's numbers" contract —
-sanitizer can clamp an out-of-range timestamp, but it has no way to
-sanitize a `clipId` that was actually a JSON number in the model's
-response, so anything not even shaped right is rejected before
-`ProjectSanitizer` ever sees it.
+command silently, never a thrown exception or a garbage value smuggled
+into a constructed `EditCommand`).
 
-**2. `ClaudeEditService`** (`ai/` package) — the actual Anthropic Messages
-API call: `POST https://api.anthropic.com/v1/messages` via
-`java.net.HttpURLConnection` (a confirmed platform API, not a new HTTP
-client dependency — the same "prefer what's already confirmed over
-guessing at a new library" reasoning `AudioWaveformLoader` followed),
-`tool_choice` forced to the one `apply_edit_commands` tool so the response
-is always structured JSON, never free text to regex-parse. The request
-embeds `EditCommandToolSchema.describeProject()`'s summary of the CURRENT
-project (real clip/track/overlay ids, durations, current filters,
-existing transitions) alongside the user's own prompt, so the model has
-real ids to reference instead of inventing them.
+**4. `LocalEditCommandService`** (`ai/` package, replaces
+`ClaudeEditService`) — orchestrates the three pieces above:
+`EditCommandToolSchema.buildFullPrompt()` → `LocalLlmEngine.generate()` →
+`LlmJsonExtractor.extractJsonArray()` → `EditCommandParser.parse()`. Same
+shape as the old cloud call (build a request, get a result, parse it),
+different transport underneath.
 
-**3. `ApiKeyStore`** (`data/settings/`) — the user's own Anthropic API key,
-stored via `EncryptedSharedPreferences` (AndroidX Security Crypto, backed
-by the Android Keystore), entered through a settings dialog, never bundled
-into the APK and never sent anywhere except directly to `api.anthropic.com`
-from the device. No backend/proxy exists or is planned — each user brings
-and pays for their own key, which is also why this needed the app's first
-`android.permission.INTERNET` declaration (previously this app made no
-network calls of any kind).
+**5. UI** (`EditorScreen.kt`, `ui/settings/ModelDownloadDialog.kt`) — an
+`AiPromptBar` at the bottom of the editor: a text field, an "AI model"
+button (opens the shared `ModelDownloadDialog`), and a "Send" button
+(disabled until the model is downloaded). Deliberately no chat
+thread/history — each request works from whatever the project looks like
+right now (which already reflects the result of the previous AI edit,
+since that's just `ProjectState` by the time the next prompt goes out),
+not from a remembered conversation. `EditorViewModel.submitAiPrompt()`
+applies every returned command through the SAME `ProjectHistory.apply()`
+→ `ProjectSanitizer` path a manual edit uses (one `syncFromHistory` call
+after all of one response's commands are applied, not one per command, so
+a multi-command AI edit doesn't flash through intermediate states on
+screen) — meaning undo/redo, autosave, and the export pipeline all
+already work on an AI-driven edit for free, without a single line of new
+code in any of them. That "the two layers never need to know about each
+other" property is the entire reason `EditCommand`/`ProjectSanitizer`
+were built as a closed taxonomy back in Phase 2, before any AI code
+existed, and it held up across this round's full transport swap without
+either layer changing.
 
-**4. UI** (`EditorScreen.kt`) — an `AiPromptBar` at the bottom of the
-editor: a text field, a "Key" button (opens `ApiKeySettingsDialog`), and a
-"Send" button. Deliberately no chat thread/history — each request works
-from whatever the project looks like right now (which already reflects
-the result of the previous AI edit, since that's just `ProjectState` by
-the time the next prompt goes out), not from a remembered conversation.
-`EditorViewModel.submitAiPrompt()` applies every returned command through
-the SAME `ProjectHistory.apply()` → `ProjectSanitizer` path a manual edit
-uses (one `syncFromHistory` call after all of one response's commands are
-applied, not one per command, so a multi-command AI edit doesn't flash
-through intermediate states on screen) — meaning undo/redo, autosave, and
-the export pipeline all already work on an AI-driven edit for free,
-without a single line of new code in any of them. That "the two layers
-never need to know about each other" property is the entire reason
-`EditCommand`/`ProjectSanitizer` were built as a closed taxonomy back in
-Phase 2, before any AI code existed.
-
-## Media indexing/search (Phase 5, stage 1)
+## Media indexing/search (Phase 5, stages 1–2)
 
 The user's own directed build order for the rest of this project is:
 **"Media indexing/search → AI library selection → AI first-cut assembly →
@@ -660,12 +702,36 @@ re-running it on every launch is cheap once the library's fully indexed.
 
 **5. UI** (`ui/search/{MediaSearchScreen, MediaSearchViewModel}.kt`) — a
 new search entry point from Home's top bar (`onOpenSearch`), a text field
-+ Search button, and a simplified always-selectable results grid (unlike
-Home's own grid, there's no separate "enter selection mode" step — every
-tap toggles selection directly). Selecting results and tapping "Add to
-Project" hands off to the exact same `EDITOR_NEW` route Home's own
-selection flow uses, so nothing downstream needs to know results came
-from a search instead of the plain grid.
++ a "Search" button (Stage 1, instant, no model needed) + an "AI Search"
+button (Stage 2, see below), and a simplified always-selectable results
+grid (unlike Home's own grid, there's no separate "enter selection mode"
+step — every tap toggles selection directly). Selecting results and
+tapping "Add to Project" hands off to the exact same `EDITOR_NEW` route
+Home's own selection flow uses, so nothing downstream needs to know
+results came from a search instead of the plain grid.
+
+### Stage 2: AI library selection, now on-device
+
+Originally planned as a second round against Anthropic's cloud API (see
+the AI layer section's "The pivot" above for why that never shipped),
+Stage 2 landed in the SAME round as the on-device pivot, built directly
+against the local model from the start. `MediaIndexRepository.aiSearch()`
+is the bridge: it runs Stage 1's own deterministic `MediaSearchQuery` as
+a RECALL pass (or falls back to the `MAX_CANDIDATES` most recent items if
+Stage 1's keyword parser finds literally nothing — a phrasing it doesn't
+recognize shouldn't blind Stage 2 too, since Stage 2 doesn't depend on
+that parser), caps the result at 150 items to keep the model's prompt a
+reasonable length, then hands that bounded candidate list to
+`LocalMediaSelectionService` — the same "build a prompt → `LocalLlmEngine.generate()`
+→ `LlmJsonExtractor` → parse" shape `LocalEditCommandService` uses for
+edit commands, with `MediaSelectionToolSchema`/`MediaSelectionParser` as
+its schema/parser pair instead of the edit-command ones. The model sees
+each candidate's type, orientation, date, reverse-geocoded locality,
+face-presence, quality score, and ML Kit labels (`MediaSelectionToolSchema.describeCandidates()`),
+and responds with a ranked JSON array of matching ids — real judgement
+over labels/dates/locations a keyword match can't do (a named holiday, a
+general mood implied by the labels), which is the entire point of having
+Stage 2 exist as something more than Stage 1.
 
 ## What's verified vs. not, this round
 
@@ -843,68 +909,87 @@ in advance is what a device test later confirmed was actually wrong,
 not a hedge that happened to be unnecessary.
 
 **The AI layer has the widest verified/unverified split of anything in
-this project — read this before trusting any of it.**
+this project — read this before trusting any of it. This round's pivot
+to a fully on-device model makes the unverified half BIGGER, not smaller:
+loading and running a native LLM is a genuinely new kind of risk this
+project has never taken on before, on top of everything the cloud version
+already couldn't verify.**
 
 Genuinely verified, the same way everything else pure-Kotlin in this
-session has been: `EditCommandToolSchema` and `EditCommandParser`'s
-`kotlinx.serialization.json` DSL usage (`buildJsonObject`,
-`putJsonArray`, `putJsonObject`) was mirrored into the standalone JVM
-harness and ACTUALLY COMPILED — unlike Media3, this code's only real
-dependency comes from Maven Central, which this sandbox can reach, so
-this is a genuine compiler check, not a read-through. That compile pass
-caught a real bug on the first attempt: `JsonArrayBuilder.add()` only
-accepts a `JsonElement`, not a raw `String` — `add("type")` and similar
-calls failed to compile until wrapped in `JsonPrimitive(...)`, in both
-the harness and the real file. The parser itself was checked against a
-realistic multi-command tool-call response (round-trips to the exact
-expected `EditCommand` list), five separate adversarial malformed-input
-cases (a missing required field, a wrong-typed field, an unrecognized
-enum value, a hallucinated command name alongside the deliberately
-excluded `AddAudio`, a `commands` value that isn't even an array), and
-one pass exercising all 19 exposed command types through the parser at
-once — 9 checks, all passing, all ported to `EditCommandParserTest`/
-`EditCommandToolSchemaTest` against the real production classes.
-`ClaudeEditService`'s pure request/response logic (`buildRequestBody`,
-`parseSuccessResponse`, `describeError` — made `internal`, not `private`,
-specifically so `ClaudeEditServiceTest` can reach them) got the same
-treatment: 5 more checks, including one that caught a second real bug —
-`Json.parseToJsonElement` THROWS on text that isn't valid JSON syntax at
-all (not just a `some-other-shape` case an `as?` cast could reject
-gracefully), so the original `parseSuccessResponse`/`describeError` would
-have propagated an exception instead of returning `AiEditResult.Failure`
-for a non-JSON response body. Both now wrap the parse call in its own
-`try`/`catch`. 45 AI-layer checks total, all passing, all with a
-checked-in JUnit counterpart.
+project has been: `EditCommandToolSchema`'s `kotlinx.serialization.json`
+DSL usage (`buildJsonObject`, `putJsonArray`, `putJsonObject`) was
+mirrored into the standalone JVM harness and ACTUALLY COMPILED back when
+this was first written against the cloud API — unlike Media3 or
+MediaPipe, this code's only real dependency comes from Maven Central,
+which this sandbox can reach, so this was (and remains) a genuine
+compiler check, not a read-through. `EditCommandParser` (UNCHANGED this
+round) was checked against a realistic multi-command response
+(round-trips to the exact expected `EditCommand` list), five separate
+adversarial malformed-input cases (a missing required field, a
+wrong-typed field, an unrecognized enum value, a hallucinated command
+name alongside the deliberately excluded `AddAudio`, a `commands` value
+that isn't even an array), and one pass exercising all 19 exposed command
+types at once. This round ADDED `LlmJsonExtractor` -- new logic, since a
+local model's response isn't structurally guaranteed JSON the way a
+forced `tool_choice` response was -- and verified it the same way: a bare
+array, an array wrapped in prose and a markdown code fence, and no array
+present at all, plus end-to-end checks running `LlmJsonExtractor` →
+`EditCommandParser`/`MediaSelectionParser` together against realistic
+messy model output (including the malformed-entry-alongside-a-valid-one
+case). 8 new checks this round, all passing, all ported to
+`LlmJsonExtractorTest`/`LocalEditCommandServiceTest`/`LocalMediaSelectionServiceTest`/`MediaSelectionParserTest`/`MediaSelectionToolSchemaTest`
+against the real production classes, alongside the pre-existing
+`EditCommandParserTest`/`EditCommandToolSchemaTest`.
 
-Completely UNVERIFIED, with no way to narrow that down further from this
-sandbox: `ClaudeEditService.requestEdit()`'s actual `HttpURLConnection`
-call has never been exercised even once — this sandbox has no confirmed
-network path to `api.anthropic.com` (unlike Maven Central, which is
-reachable), and there's no device to run the app on either. The request/
-response SHAPE is written from the Messages API's publicly documented
-format, but "documented format" and "what the live API actually returns"
-are not the same claim. The `MODEL` constant (`claude-sonnet-5`) is
-similarly unconfirmed against the live API's current model list — check
-it before relying on this. `ApiKeyStore`'s `EncryptedSharedPreferences`
-usage is standard, well-documented AndroidX API, but — like every other
-Android-only class this session — has never actually run: not the key
-generation, not the encrypt/decrypt round-trip, not what happens on a
-device without a usable Keystore. The entire Compose UI (`AiPromptBar`,
-`ApiKeySettingsDialog`) is new, untested interaction code, same as every
-other UI addition this session. One thing this pass DID catch by simply
-re-reading the manifest rather than guessing: `AndroidManifest.xml` had
-no `android.permission.INTERNET` at all before this round (this app made
-zero network calls before now) — without it, the OS blocks outbound
-sockets at the platform level regardless of anything the app-level
-networking code does correctly. Added, but like everything else in this
-section, not device-confirmed.
+Completely UNVERIFIED, with no way to narrow it down further from this
+sandbox: `LocalLlmEngine`'s actual `LlmInference.createFromOptions()` /
+`generateResponse()` calls have never been exercised even once — this is
+the first time this project has ever loaded a model for open-ended text
+generation, there is no Android SDK, device, or emulator here to load a
+real `.task` file into, and MediaPipe's official docs
+(`ai.google.dev`/`developers.google.com`) are themselves blocked by this
+sandbox's network policy. What this round COULD do instead: the
+`LlmInference.LlmInferenceOptions.builder()` shape, the
+`com.google.mediapipe.tasks.genai.llminference` package path, the
+`generateResponse(String): String` method signature, the
+`com.google.mediapipe:tasks-genai:0.10.27` Maven coordinate, and the
+"treat it as a singleton, loading is expensive" guidance `LocalLlmEngine`
+follows were all cross-checked against multiple independent web search
+results (not a single unconfirmed guess) — meaningfully more grounded
+than a cold guess, but still NOT the same claim as a compiled build.
+Whether the model actually loads without OOM-ing on a mid-range phone,
+whether it reliably follows the "respond with ONLY a JSON array" prompt
+instruction (a REAL, likely capability reduction versus Claude's
+structurally-forced tool calls — a 1B-parameter on-device model has no
+business being expected to match a frontier cloud model's instruction-
+following), and how long one generation call actually takes are all
+unknown. `LocalLlmModelManager`'s download logic reuses the exact
+`HttpURLConnection` pattern the old `ClaudeEditService` used (streaming
+to a `.part` file, only renaming on full success) — the pattern itself
+inherits whatever confidence that gave, but the specific
+`MODEL_DOWNLOAD_URL`/filename it targets is UNVERIFIED (this sandbox's
+network policy blocks huggingface.co directly, so the exact current file
+listing at `litert-community/Gemma3-1B-IT` could not be confirmed — see
+the class's own doc comment). `ModelAccessTokenStore`'s
+`EncryptedSharedPreferences` usage is standard AndroidX API (same as the
+`ApiKeyStore` it replaced), but has never actually run. The entire
+Compose UI (`AiPromptBar`, `ModelDownloadDialog`, the AI search button
+and dialog wiring in `MediaSearchScreen`) is new, untested interaction
+code.
 
-Needs an on-device check before any of this is trusted: enter a real API
-key, submit a simple prompt ("make this clip black and white"), confirm
-the request actually reaches Anthropic's API (not just that the app
-doesn't crash), confirm the response gets parsed and applied correctly,
-and confirm a deliberately bad key produces a clear error message rather
-than a silent failure or crash.
+Needs an on-device check before any of this is trusted, roughly in this
+order since each depends on the last actually working: (1) does the
+model file download complete and land at the expected path with a valid
+Hugging Face token; (2) does `LlmInference.createFromOptions()` load it
+without crashing or OOM-ing; (3) does a simple prompt ("make this clip
+black and white") produce a response `LlmJsonExtractor` can find an array
+in at all; (4) does that array actually contain a well-formed, correct
+`EditCommand`; (5) does the AI search flow's candidate-list prompt
+produce a plausible ranked id list. A failure at any step should narrow
+which of the several genuinely new pieces here (download URL, model
+loading, prompt-following, JSON extraction) is actually broken, rather
+than treating "the AI layer doesn't work" as one undifferentiated
+failure.
 
 **Media indexing/search has the same "pure logic verified, Android glue
 entirely unverified" split as everything else in this project — and this
@@ -968,24 +1053,28 @@ best-effort ML/heuristic layers), but plausible.
 
 ## What's not here yet
 
-- **AI prompt interface, beyond the first slice below** (spec sections
-  4–9, 21): a basic "type a prompt, get edits applied" flow now exists
-  (see "AI layer (Phase 4)") — still missing: multi-turn conversation/
-  chat history (each request is independent), any kind of edit preview
-  before commands apply (they apply immediately, same as a manual edit,
-  reversible only via Undo), voice input, and anything resembling a
+- **AI prompt interface, beyond the current slice below** (spec sections
+  4–9, 21): a "type a prompt, get edits applied" flow exists and now runs
+  fully on-device (see "AI layer (Phase 4)") — still missing: multi-turn
+  conversation/chat history (each request is independent), any kind of
+  edit preview before commands apply (they apply immediately, same as a
+  manual edit, reversible only via Undo), voice input, streaming/
+  incremental response display (the model generates a full response
+  before anything shows on screen), and anything resembling a
   guided/suggested-prompts UI.
-- **LLM-based ("Stage 2") natural-language query understanding** (spec
-  section 5–6): the deterministic Stage 1 matching described in "Media
-  indexing/search (Phase 5, stage 1)" above now exists (object/scene
-  labels, face presence, GPS→locality, date phrases, a quality-sort
-  signal) — still missing: an LLM actually parsing a free-form query
-  (vs. keyword/date-phrase matching), embeddings/semantic search, and any
-  form of "AI library selection" (the AI layer still can only reference
-  media already placed in the project — see `EditCommandParser`'s
-  deliberate exclusion of `AddAudio` — it cannot browse or select from the
-  device's library on the user's behalf; that's the next stage in the
-  user's own stated chain, not started).
+- **AI first-cut assembly (stage 3 of the user's own stated chain)** (spec
+  section 5–6, 26): Stage 1 (deterministic keyword/date search) and Stage
+  2 (on-device LLM library selection, see "Media indexing/search" above)
+  both now exist — still missing: the model actually ASSEMBLING selected
+  media into a first-cut project (choosing an order, trims, pacing) rather
+  than just returning a ranked list the user manually adds to a project;
+  embeddings/semantic search as an alternative or complement to Stage 1's
+  keyword matching; and stage 4, "the polished killer workflow" the user's
+  own chain names as the final target, not started at all. The edit-prompt
+  AI layer above also still can only reference media already placed in a
+  project — see `EditCommandParser`'s deliberate exclusion of `AddAudio`
+  — it cannot pull new media in from the library on its own; that's
+  exactly the gap stage 3 is meant to close.
 - **Photo editor** (spec section 10) beyond a still image as a timeline
   clip: no crop/brightness/filters screen for a single photo.
 - **AI photo features** (background removal, smart crop as a standalone
@@ -1023,15 +1112,18 @@ AIMediaEditor/
             │              AddAudioDialog}.kt
             ├── ui/projects/{ProjectsScreen, ProjectsViewModel}.kt
             ├── ui/search/{MediaSearchScreen, MediaSearchViewModel}.kt
+            ├── ui/settings/ModelDownloadDialog.kt
             ├── data/media/{MediaItem, MediaRepository, AudioRepository,
             │               VideoThumbnailLoader, AudioWaveformLoader}.kt
             ├── data/project/{ProjectRecord, ProjectRepository}.kt
-            ├── data/settings/ApiKeyStore.kt
+            ├── data/settings/ModelAccessTokenStore.kt
             ├── data/index/{MediaSearchQuery, MediaIndexEntity, MediaIndexDao,
             │               AppDatabase, MediaAnalyzer, MediaIndexRepository,
             │               MediaIndexWorker}.kt
-            ├── ai/{EditCommandToolSchema, EditCommandParser,
-            │       ClaudeEditService}.kt
+            ├── ai/{EditCommandToolSchema, EditCommandParser, LlmJsonExtractor,
+            │       LocalLlmEngine, LocalLlmModelManager, LocalEditCommandService,
+            │       MediaSelectionToolSchema, MediaSelectionParser,
+            │       LocalMediaSelectionService}.kt
             ├── editor/{EditorViewModel, MediaMapping}.kt
             ├── editor/model/{ProjectState, EditCommand, ProjectSanitizer,
             │                 ProjectHistory, CropMath, TimelinePositions}.kt
@@ -1041,7 +1133,9 @@ AIMediaEditor/
         ├── editor/model/{ProjectStateSerializationTest, ProjectSanitizerTest,
         │                 CropMathTest, ProjectHistoryTest}.kt
         ├── ai/{EditCommandParserTest, EditCommandToolSchemaTest,
-        │       ClaudeEditServiceTest}.kt
+        │       LlmJsonExtractorTest, LocalEditCommandServiceTest,
+        │       MediaSelectionParserTest, MediaSelectionToolSchemaTest,
+        │       LocalMediaSelectionServiceTest}.kt
         └── data/index/MediaSearchQueryTest.kt
 ```
 
@@ -1063,12 +1157,13 @@ module boundary earns its build-time cost.
 | Coil | 3.3.0 (`io.coil-kt.coil3`) | Local `content://` thumbnails, no network module |
 | kotlinx-serialization-json | 1.9.0 | Project (de)serialization for autosave; the Kotlin plugin variant is pinned to the Kotlin version above (guaranteed matching, not a guess) |
 | JUnit4 | 4.13.2 | `app/src/test` unit test suite (see "Hardening pass") |
-| AndroidX Security Crypto | 1.1.0 | `EncryptedSharedPreferences`-backed storage for the user's own Anthropic API key (`ApiKeyStore`) — chosen over hand-rolled `Cipher`/`Keystore` wiring for the same reason as everywhere else in this project: a well-known first-party library is a smaller risk than rolling your own crypto |
+| AndroidX Security Crypto | 1.1.0 | `EncryptedSharedPreferences`-backed storage for the user's own Hugging Face access token (`ModelAccessTokenStore`, formerly `ApiKeyStore` when it held an Anthropic key) — chosen over hand-rolled `Cipher`/`Keystore` wiring for the same reason as everywhere else in this project: a well-known first-party library is a smaller risk than rolling your own crypto |
 | AndroidX Room (runtime, ktx, compiler) | 2.7.1 | The local media index (`data/index/`) — explicitly named by spec section 16, not a discretionary choice; first use of Room in this project, entirely unverified from this sandbox (no Android SDK to compile/run the generated code against) |
-| KSP (`com.google.devtools.ksp`) | 2.3.20-1.0.29 | Room's annotation processor. **Highest build-risk item this round**: KSP releases are versioned against a specific Kotlin compiler version, and this pin must exactly match the Kotlin version above or Gradle sync itself fails, before the app even attempts to compile |
+| KSP (`com.google.devtools.ksp`) | 2.3.20-1.0.29 | Room's annotation processor. **Highest BUILD-sync-failure risk**: KSP releases are versioned against a specific Kotlin compiler version, and this pin must exactly match the Kotlin version above or Gradle sync itself fails, before the app even attempts to compile |
 | AndroidX ExifInterface | 1.3.7 | Reads GPS EXIF data from photos for `MediaAnalyzer`'s locality extraction (paired with `ACCESS_MEDIA_LOCATION`, newly declared this round) |
 | ML Kit Image Labeling | 17.0.9 | On-device object/scene labels for search (`MediaAnalyzer`) — first ML Kit usage in this project, entirely unverified from this sandbox |
 | ML Kit Face Detection | 16.1.7 | On-device face presence/count for search's "photos of people" style queries — presence/count only, no identity or recognition |
+| MediaPipe Tasks GenAI | 0.10.27 | `com.google.mediapipe:tasks-genai` — the on-device Gemma runtime (`LocalLlmEngine`) both AI features (edit prompts, AI search) run on. **Highest RUNTIME-risk item in this project overall**: version cross-checked via web search (this sandbox has no direct network path to Google's Maven or Maven Central to confirm the exact current release against live metadata), and the actual model-loading/generation behavior has never been exercised even once — see "What's verified vs. not" |
 | compileSdk / targetSdk / minSdk | 37 / 36 / 26 | targetSdk pinned one level back of compileSdk so Android 17's forced behavior changes don't land before they're deliberately handled |
 
 ## Build instructions
@@ -1099,26 +1194,38 @@ already-verified source into the repository, not re-verifying it.
 Build ▸ Build Bundle(s)/APK(s) ▸ Build APK(s) in Android Studio; output
 lands in `app/build/outputs/apk/debug/`.
 
-## Setup instructions for the AI layer
+## Setup instructions for the on-device AI model
 
-A live AI call exists now (see "AI layer (Phase 4)" below) and needs the
-user's own Anthropic API key:
+Both AI features (the editor's AI prompt bar and AI search) share one
+locally-run Gemma model, downloaded once and then used fully offline —
+no per-feature setup, no API key, no billing:
 
-1. Get a key from [console.anthropic.com](https://console.anthropic.com/) —
-   this app makes real, billable API calls under whatever key is entered.
-2. In the app, open a project in the editor, tap "Key" next to the AI prompt
-   bar at the bottom of the screen, paste the key, tap Save.
-3. The key is stored on-device via `EncryptedSharedPreferences`
-   (`data/settings/ApiKeyStore.kt`) and is never bundled into the APK, never
-   sent anywhere except directly to `api.anthropic.com` from the device
-   making the request — no backend/proxy server exists or is planned; each
-   user supplies and pays for their own key.
+1. Get a Hugging Face access token: sign in (or create a free account) at
+   [huggingface.co](https://huggingface.co/), open
+   [litert-community/Gemma3-1B-IT](https://huggingface.co/litert-community/Gemma3-1B-IT),
+   accept the Gemma license on that page (the repo is gated — this step is
+   required before any file in it can be downloaded), then create an
+   access token under your account settings.
+2. In the app, open a project in the editor and tap "AI model" next to the
+   AI prompt bar (or, from the search screen, tap "AI Search" before the
+   model is downloaded) — either opens the same `ModelDownloadDialog`.
+   Paste the token, tap Download.
+3. The token is stored on-device via `EncryptedSharedPreferences`
+   (`data/settings/ModelAccessTokenStore.kt`) purely so an interrupted
+   download can be retried without re-pasting it — it is used ONLY as
+   that download request's Authorization header, sent to nowhere but
+   huggingface.co, and never touched again once the model file exists.
+   The model itself (several hundred MB to ~1GB) is cached under the
+   app's private storage; once downloaded, both AI features run with
+   zero network calls, for every future request, forever — there is no
+   per-request key, no billing, and no server this app talks to at all
+   beyond that one download.
 
-Still not built: on-device ML (architecture-notes "Level 1") for media
-indexing/search — e.g. ML Kit for face/object detection and scene labeling
-with no network call, matching spec section 15's privacy principle. That
-remains a separate, later piece of Phase 4/5 from the edit-command layer
-described below.
+This is a genuine architecture change from an earlier design: Phase 4 was
+originally built against Anthropic's cloud Messages API (the user would
+supply an Anthropic key, and each AI request left the device) — see "The
+pivot" under "AI layer (Phase 4)" above for why that was replaced before
+it ever shipped.
 
 ## Known limitations
 
@@ -1199,28 +1306,59 @@ described below.
 - `app/src/test` now exists (see "Hardening pass" below) but only covers
   pure, portable Kotlin — `editor/model/` (four test classes:
   serialization, `ProjectSanitizer`, `CropMath`, `ProjectHistory`) and the
-  parts of `ai/` with no Android/network dependency (three more:
+  parts of `ai/` with no Android/native-model dependency (seven more:
   `EditCommandParserTest`, `EditCommandToolSchemaTest`,
-  `ClaudeEditServiceTest` — the last of these deliberately excludes
-  `ClaudeEditService.requestEdit()` itself, the actual network call).
+  `LlmJsonExtractorTest`, `LocalEditCommandServiceTest`,
+  `MediaSelectionParserTest`, `MediaSelectionToolSchemaTest`,
+  `LocalMediaSelectionServiceTest` — the last two of these deliberately
+  exclude `LocalEditCommandService.requestEdit()`/`LocalMediaSelectionService.requestSelection()`
+  themselves, the actual local-model calls through `LocalLlmEngine`).
   Everything Android-touching (`data/media/`, `data/project/`,
-  `data/settings/`, all of `ui/`, `editor/export/`, and the network half of
-  `ai/`) still has zero automated coverage; only `./gradlew test` (JVM unit
-  tests) is wired up, not `./gradlew connectedAndroidTest` (instrumented,
-  needs a device/emulator) — this sandbox can run neither, so even the new
+  `data/settings/`, all of `ui/`, `editor/export/`, and the model-loading
+  half of `ai/`) still has zero automated coverage; only `./gradlew test`
+  (JVM unit tests) is wired up, not `./gradlew connectedAndroidTest`
+  (instrumented, needs a device/emulator) — this sandbox can run neither,
+  so even the new
   suite is unexecuted here, same caveat as everything else Android-specific
   in this project.
 - The AI layer (see its own section above) has no chat history/thread
   (each prompt works from the CURRENT project only), no way to preview an
   AI-suggested edit before it applies (it applies immediately and is only
   reversible via Undo, same as a manual edit — there's no "review, then
-  accept/reject" step), no retry/cancel button on an in-flight request, no
-  usage/cost display, and no rate limiting or spend cap of any kind —
-  every submitted prompt is a real, billable API call under whatever key
-  is stored, with nothing in this app to stop a runaway loop of requests.
-  Only one request can be in flight at a time (the Send button disables
-  while loading), but nothing stops rapid repeated submissions once a
-  response comes back.
+  accept/reject" step), no retry/cancel button on an in-flight request or
+  in-flight download, and no streaming/incremental response display (the
+  on-device model generates its full response before anything shows on
+  screen — no per-token UI update). Since the AI layer now runs entirely
+  on-device, the OLD limitations about billing/rate limiting no longer
+  apply (there is no per-request cost, and no server to rate-limit
+  against) — the NEW limitation in their place is on-device generation
+  latency and resource use: a 1B-parameter model running on a phone's
+  CPU/GPU is meaningfully slower than a cloud call was expected to be,
+  and nothing in this app currently shows progress DURING a generation
+  call, only before (model download) and after (result or error). Only
+  one AI request can be in flight at a time (the Send/AI Search button
+  disables while loading), but nothing stops rapid repeated submissions
+  once a response comes back. The on-device model's capability ceiling is
+  also a real, honest limitation versus the original cloud-API design: a
+  small local model is meaningfully less likely to reliably follow the
+  "respond with ONLY a JSON array matching this schema" instruction than
+  Claude was with tool-calling structurally forced — `LlmJsonExtractor`
+  narrows this gap but doesn't close it, and a response it can't find a
+  JSON array in at all just surfaces as "the assistant didn't suggest any
+  changes" / "no recognizable list of ids," not a retry or a clearer
+  explanation of what went wrong.
+- The on-device model itself: the download is a one-time ~500MB-1GB
+  transfer gated behind a free-but-required Hugging Face account and
+  accepting the Gemma license (see "Setup instructions") — there's no way
+  around that gate from within the app, and no resume-mid-download
+  support beyond "the whole download restarts if interrupted" (the
+  `.part`-file approach only prevents a PARTIAL file from being
+  mistaken for a complete one, it doesn't resume a byte range). No
+  storage-space check before starting the download, no way to delete the
+  cached model from within the app's UI yet (only via clearing app data),
+  and no re-download/update path if a newer model version is published
+  later — whatever was downloaded once is used until the app's storage is
+  cleared.
 - Not verified: performance on low-RAM devices, 4K sources, thermal
   throttling during export, HDR tone-mapping.
 - Media indexing/search (see its own section above) has no LLM-based query
@@ -1372,31 +1510,48 @@ Manual, on a real device (no SDK in this sandbox to run instrumented tests):
 12. Create several projects, confirm Home's "Projects" row and the full
     Projects screen agree on what exists and show a sensible relative time
     ("Just now", "Xm ago", etc.) that updates on revisit.
-13a. In the editor, tap "Key" next to the AI prompt bar → confirm the
-     dialog opens, accepts pasted text, and Save closes it. Reopen the
-     dialog → confirm it now offers "Clear" (evidence a key is stored)
-     without ever showing the key's actual value back. Force-close and
-     reopen the app, return to the editor → confirm the key is still
-     considered present (persisted, not just in-memory for the session).
-13b. With a real Anthropic API key entered, type a simple, unambiguous
-     prompt ("make the first clip black and white") and tap Send → confirm
-     a loading indicator shows, then either the requested edit actually
-     appears in the project (confirm via Undo that it's a real, undoable
-     history entry) or a clear error message shows — never a silent
-     no-op or an app crash. Try a prompt requiring several commands at
-     once ("make it black and white and add a fade between the clips") →
-     confirm multiple edits land from one request.
+13a. In the editor, tap "AI model" next to the AI prompt bar → confirm the
+     `ModelDownloadDialog` opens showing the download explanation and a
+     token field. Paste a real Hugging Face token (see "Setup
+     instructions") and tap Download → confirm a progress indicator shows
+     (a percentage once the server reports a size, otherwise an
+     indeterminate spinner) and, on success, the dialog switches to a
+     "Model downloaded and ready" state. Reopen the dialog after closing
+     it → confirm it goes straight to the ready state rather than asking
+     to download again. Force-close and reopen the app, return to the
+     editor → confirm the model is still considered ready (the file
+     persisted, not just an in-memory flag for the session).
+13b. With the model downloaded, type a simple, unambiguous prompt ("make
+     the first clip black and white") and tap Send → confirm a loading
+     indicator shows, then either the requested edit actually appears in
+     the project (confirm via Undo that it's a real, undoable history
+     entry) or a clear error message shows — never a silent no-op or an
+     app crash. Time roughly how long generation takes (there is
+     currently no README-documented expectation for this — record it as
+     a data point for whether the on-device latency is acceptable UX).
+     Try a prompt requiring several commands at once ("make it black and
+     white and add a fade between the clips") → confirm multiple edits
+     land from one request if the model's response actually contains
+     both as a JSON array.
 13c. Try a prompt the AI can't fulfill with the available commands (e.g.
      "add some upbeat background music" — `AddAudio` is deliberately not
-     exposed to the AI) → confirm the assistant's explanation shows
-     instead of a crash or a silently-ignored request.
-13d. Clear the API key, try to send a prompt → confirm the Send button is
-     disabled (not just that the request fails) and the "no API key set"
-     hint is visible. Enter a deliberately invalid key and try again →
-     confirm a clear, specific error message shows (not a generic crash
-     or an infinite loading spinner). Turn on airplane mode and try a
-     prompt with a valid key → confirm a network-failure message shows
-     rather than a hang.
+     exposed to the AI) → confirm SOME reasonable outcome (no edit
+     applied, and either a fallback message or no message) rather than a
+     crash or a silently-wrong edit. Unlike the earlier cloud-API design,
+     a local model has no guaranteed separate "explanation" channel
+     alongside its JSON response — confirm this doesn't manifest as a
+     crash even when the model's response is entirely prose with no
+     array in it at all (`LlmJsonExtractor` should produce a fallback
+     message, not throw).
+13d. Delete the model file (clear the app's storage, or use `adb shell`
+     to remove the cached `.task` file directly) and relaunch → confirm
+     the Send button is disabled and the "model not downloaded" hint is
+     visible again, exactly like before the first download. Turn on
+     airplane mode and try downloading the model with a valid token →
+     confirm a network-failure message shows rather than a hang. Try
+     downloading with a deliberately invalid/expired token → confirm the
+     401/403 message ("check the token is valid and the Gemma license has
+     been accepted") shows rather than a generic failure.
 14a. Fresh install, grant media permission on a device with a real, mixed
      photo/video library (some with GPS data, some with people in them,
      some without) → watch `adb logcat` briefly to confirm the indexing
@@ -1429,6 +1584,26 @@ Manual, on a real device (no SDK in this sandbox to run instrumented tests):
      limitation: indexing only re-runs on the next permission-grant path,
      not on new media). Force-stop and relaunch the app → search again →
      confirm it now appears.
+15a. On the search screen, before the AI model is downloaded, tap "AI
+     Search (setup)" → confirm the same `ModelDownloadDialog` from the
+     editor opens (shared component — a token saved in the editor should
+     already show as ready here too, and vice versa, since both read/write
+     `ModelAccessTokenStore`/the same cached model file). Download it.
+16a. With the model ready, type a query closer to spec section 5's actual
+     phrasing than Stage 1's keyword matching can handle well — something
+     implying a mood/vibe from labels rather than a literal keyword (e.g.
+     "photos that feel relaxing" or "my most exciting videos") or a named
+     event/holiday your test library doesn't literally caption — and tap
+     "AI Search" → confirm a loading state shows, then either a plausible
+     ranked result set appears or the assistant's fallback "didn't
+     contain a recognizable list of ids" message shows (never a crash).
+     Compare the same query's results against plain "Search" (Stage 1) →
+     the two are not expected to agree, since that's the entire point of
+     Stage 2 existing — note qualitatively whether the AI results are
+     more relevant, since there is no automated way to grade this.
+16b. Try an AI Search query on a very small or freshly-installed library
+     (few or zero indexed items) → confirm the "hasn't finished indexing
+     yet" message shows rather than a crash or an empty spinner forever.
 
 ## Why it stops here
 

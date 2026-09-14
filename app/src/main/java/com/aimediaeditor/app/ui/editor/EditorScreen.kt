@@ -36,10 +36,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import com.aimediaeditor.app.data.settings.ApiKeyStore
+import com.aimediaeditor.app.data.settings.ModelAccessTokenStore
+import com.aimediaeditor.app.ui.settings.ModelDownloadDialog
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -80,6 +80,7 @@ fun EditorScreen(
     LaunchedEffect(existingProjectId) {
         if (existingProjectId != null) viewModel.loadProject(existingProjectId) else viewModel.initializeProject(initialMedia)
     }
+    LaunchedEffect(Unit) { viewModel.refreshModelReady() }
 
     // Flushes any pending debounced autosave the moment the user leaves this screen,
     // by navigating back or by the app backgrounding -- both are points where losing the
@@ -202,18 +203,15 @@ fun EditorScreen(
     var showTextDialog by remember { mutableStateOf(false) }
     var showAudioDialog by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
-    var showApiKeyDialog by remember { mutableStateOf(false) }
+    var showModelDownloadDialog by remember { mutableStateOf(false) }
     var selectedAudioTrackId by remember { mutableStateOf<String?>(null) }
 
     // EncryptedSharedPreferences.create() does real (small, but synchronous) file/
-    // Keystore I/O -- created once per screen via `remember`, not per recomposition,
-    // to keep that cost to a single hit rather than paying it repeatedly. hasApiKey is
-    // its own separate state (not read fresh from the store on every recomposition)
-    // since the store itself isn't Compose-observable -- bumped explicitly whenever the
-    // settings dialog actually changes the stored key, so the UI reflects a save/clear
-    // immediately without needing a full reactive wrapper around EncryptedSharedPreferences.
-    val apiKeyStore = remember { ApiKeyStore(context) }
-    var hasApiKey by remember { mutableStateOf(apiKeyStore.hasKey()) }
+    // Keystore I/O -- created once per screen via `remember`, not per recomposition.
+    // Only used to prefill/save a Hugging Face token for the one-time on-device model
+    // download (see ModelDownloadDialog below) -- unlike the Anthropic API key this
+    // replaced, nothing here is used on every AI request, only once per download.
+    val tokenStore = remember { ModelAccessTokenStore(context) }
 
     // Timeline zoom: both lanes take this as their pixelsPerSecond, so zooming affects
     // clips and audio blocks identically -- a given clip never looks a different length
@@ -410,32 +408,27 @@ fun EditorScreen(
 
             AiPromptBar(
                 isLoading = uiState.isAiLoading,
-                hasApiKey = hasApiKey,
+                isModelReady = uiState.isModelReady,
                 assistantMessage = uiState.aiMessage,
                 errorMessage = uiState.aiError,
-                onOpenSettings = { showApiKeyDialog = true },
-                onSubmit = { prompt ->
-                    val key = apiKeyStore.getKey()
-                    if (key != null) viewModel.submitAiPrompt(key, prompt)
-                },
+                onOpenModelSettings = { showModelDownloadDialog = true },
+                onSubmit = viewModel::submitAiPrompt,
                 onDismissFeedback = viewModel::clearAiFeedback
             )
         }
     }
 
-    if (showApiKeyDialog) {
-        ApiKeySettingsDialog(
-            hasExistingKey = hasApiKey,
-            onDismiss = { showApiKeyDialog = false },
-            onSave = { key ->
-                apiKeyStore.setKey(key)
-                hasApiKey = true
-                showApiKeyDialog = false
-            },
-            onClear = {
-                apiKeyStore.clearKey()
-                hasApiKey = false
-                showApiKeyDialog = false
+    if (showModelDownloadDialog) {
+        ModelDownloadDialog(
+            isModelReady = uiState.isModelReady,
+            isDownloading = uiState.isModelDownloading,
+            progress = uiState.modelDownloadProgress,
+            error = uiState.modelDownloadError,
+            initialToken = tokenStore.getToken().orEmpty(),
+            onDismiss = { showModelDownloadDialog = false },
+            onDownload = { token ->
+                tokenStore.setToken(token)
+                viewModel.downloadModel(token)
             }
         )
     }
@@ -495,15 +488,17 @@ private fun RenameProjectDialog(currentName: String, onDismiss: () -> Unit, onCo
  * chat history/thread -- each request is independent, working from whatever the
  * PROJECT looks like right now (including the result of the previous AI edit, since
  * that already lives in [ProjectState] by the time the next prompt goes out), not from
- * a remembered conversation.
+ * a remembered conversation. Runs entirely on-device (see [ModelDownloadDialog]) --
+ * unlike the cloud version this replaced, there's no per-request credential, only a
+ * one-time model download gate.
  */
 @Composable
 private fun AiPromptBar(
     isLoading: Boolean,
-    hasApiKey: Boolean,
+    isModelReady: Boolean,
     assistantMessage: String?,
     errorMessage: String?,
-    onOpenSettings: () -> Unit,
+    onOpenModelSettings: () -> Unit,
     onSubmit: (String) -> Unit,
     onDismissFeedback: () -> Unit
 ) {
@@ -518,19 +513,19 @@ private fun AiPromptBar(
                 singleLine = true,
                 enabled = !isLoading
             )
-            TextButton(onClick = onOpenSettings) { Text("Key") }
+            TextButton(onClick = onOpenModelSettings) { Text("AI model") }
             TextButton(
                 onClick = {
                     onDismissFeedback()
                     onSubmit(prompt)
                     prompt = ""
                 },
-                enabled = !isLoading && hasApiKey && prompt.isNotBlank()
+                enabled = !isLoading && isModelReady && prompt.isNotBlank()
             ) { Text("Send") }
         }
-        if (!hasApiKey) {
+        if (!isModelReady) {
             Text(
-                "No API key set -- tap \"Key\" to add your own Anthropic API key.",
+                "On-device AI model not downloaded yet -- tap \"AI model\" to set it up (one-time, offline afterward).",
                 style = MaterialTheme.typography.labelSmall
             )
         }
@@ -552,55 +547,6 @@ private fun AiPromptBar(
             )
         }
     }
-}
-
-/**
- * Never bundled into the APK, never sent anywhere except directly to Anthropic's own
- * API from this device -- the README's stated plan for this since before any AI code
- * existed. [androidx.security.crypto.EncryptedSharedPreferences] (via
- * [com.aimediaeditor.app.data.settings.ApiKeyStore]) is what actually backs storage;
- * this dialog is just the entry point for it.
- */
-@Composable
-private fun ApiKeySettingsDialog(
-    hasExistingKey: Boolean,
-    onDismiss: () -> Unit,
-    onSave: (String) -> Unit,
-    onClear: () -> Unit
-) {
-    var text by remember { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Anthropic API key") },
-        text = {
-            Column {
-                Text(
-                    "Stored securely on this device only. Used directly by this app to call " +
-                        "Anthropic's API for AI edit requests -- never sent anywhere else.",
-                    style = MaterialTheme.typography.bodySmall
-                )
-                OutlinedTextField(
-                    value = text,
-                    onValueChange = { text = it },
-                    modifier = Modifier.padding(top = 8.dp),
-                    singleLine = true,
-                    placeholder = { Text(if (hasExistingKey) "•••• (already set)" else "sk-ant-...") },
-                    visualTransformation = PasswordVisualTransformation()
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { onSave(text) }, enabled = text.isNotBlank()) { Text("Save") }
-        },
-        dismissButton = {
-            Row {
-                if (hasExistingKey) {
-                    TextButton(onClick = onClear) { Text("Clear") }
-                }
-                TextButton(onClick = onDismiss) { Text("Cancel") }
-            }
-        }
-    )
 }
 
 @Composable
