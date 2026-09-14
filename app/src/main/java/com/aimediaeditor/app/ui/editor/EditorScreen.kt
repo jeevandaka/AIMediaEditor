@@ -4,6 +4,7 @@ package com.aimediaeditor.app.ui.editor
 
 import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -13,8 +14,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -24,13 +28,20 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.aimediaeditor.app.ai.DeviceCapabilities
+import com.aimediaeditor.app.data.settings.ModelAccessTokenStore
+import com.aimediaeditor.app.ui.settings.ModelDownloadBanner
+import com.aimediaeditor.app.ui.settings.ModelDownloadDialog
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -50,6 +61,8 @@ import com.aimediaeditor.app.editor.model.FilterType
 import com.aimediaeditor.app.editor.model.VideoClip
 import com.aimediaeditor.app.editor.model.TextOverlay
 import com.aimediaeditor.app.editor.model.clipStartOffsetMs
+import com.aimediaeditor.app.editor.model.effectiveEffects
+import com.aimediaeditor.app.editor.model.effectiveTransitions
 import com.aimediaeditor.app.editor.model.ratio
 import java.util.UUID
 
@@ -57,7 +70,8 @@ private enum class PreviewMode { CLIP, TIMELINE }
 
 @Composable
 fun EditorScreen(
-    initialMedia: List<MediaItem>,
+    initialMedia: List<MediaItem> = emptyList(),
+    existingProjectId: String? = null,
     onBack: () -> Unit,
     viewModel: EditorViewModel = viewModel()
 ) {
@@ -65,7 +79,18 @@ fun EditorScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val uiState by viewModel.uiState.collectAsState()
 
-    LaunchedEffect(Unit) { viewModel.initializeProject(initialMedia) }
+    LaunchedEffect(existingProjectId) {
+        if (existingProjectId != null) viewModel.loadProject(existingProjectId) else viewModel.initializeProject(initialMedia)
+    }
+    LaunchedEffect(Unit) { viewModel.refreshModelReady() }
+
+    // Flushes any pending debounced autosave the moment the user leaves this screen,
+    // by navigating back or by the app backgrounding -- both are points where losing the
+    // last ~800ms debounce window would mean losing an edit (spec section 22).
+    fun saveAndBack() {
+        viewModel.saveNow()
+        onBack()
+    }
 
     // One ExoPlayer for this whole screen -- created once, media item swapped as the
     // selected clip changes, released exactly once on dispose. Never a second instance
@@ -73,7 +98,11 @@ fun EditorScreen(
     val exoPlayer = remember { ExoPlayer.Builder(context).build() }
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE) exoPlayer.pause()
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> exoPlayer.pause()
+                Lifecycle.Event.ON_STOP -> viewModel.saveNow()
+                else -> Unit
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
@@ -85,6 +114,30 @@ fun EditorScreen(
     val selectedClip = uiState.project.clips.firstOrNull { it.id == uiState.selectedClipId }
     var previewMode by remember { mutableStateOf(PreviewMode.CLIP) }
 
+    // Text overlays whose time window overlaps the SELECTED clip's own span on the
+    // project timeline -- these are the ones it makes sense to show a drag handle for in
+    // the single-clip preview, since that's the only clip currently visible there. An
+    // overlay spanning multiple clips gets a handle on each one it overlaps; dragging any
+    // of them moves the one underlying overlay (they all read/write the same id).
+    val visibleTextOverlays = remember(uiState.project.textOverlays, selectedClip, uiState.project.clips) {
+        val clip = selectedClip
+        if (clip == null) {
+            emptyList()
+        } else {
+            val clipStart = uiState.project.clipStartOffsetMs(clip.id)
+            val clipEnd = clipStart + clip.durationMs
+            uiState.project.textOverlays.filter { it.startMs < clipEnd && it.endMs > clipStart }
+        }
+    }
+
+    // Which clip ids currently have a LIVE transition after them -- drives which
+    // TimelineStrip toggle renders as active. Goes through effectiveTransitions(), not
+    // the raw list, so a transition orphaned by a delete/reorder never shows as active
+    // in the UI even if it's still sitting in project.transitions (see ProjectState).
+    val transitionsAfterClipIds = remember(uiState.project.transitions, uiState.project.clips) {
+        uiState.project.effectiveTransitions().mapTo(mutableSetOf()) { it.afterClipId }
+    }
+
     LaunchedEffect(selectedClip?.id, previewMode) {
         if (previewMode != PreviewMode.CLIP) return@LaunchedEffect
         if (selectedClip != null && selectedClip.sourceType == MediaType.VIDEO) {
@@ -92,6 +145,39 @@ fun EditorScreen(
             exoPlayer.prepare()
         } else {
             exoPlayer.stop()
+        }
+    }
+
+    // Live filter preview for the selected video clip. Separate from the effect
+    // above on purpose: it must NOT re-trigger setMediaItem/prepare (that would
+    // restart playback from 0 every time a filter chip is tapped) -- setVideoEffects
+    // can be called on its own at any time. Reuses CompositionBuilder.stackedFilterEffects
+    // (the exact function export uses, for the clip's full effect stack, not just one
+    // filter) rather than a second hand-written mapping, so this preview can't drift
+    // from what actually gets exported.
+    //
+    // Honest risk: ExoPlayer.setVideoEffects(List<Effect>) is a real, documented
+    // Media3 API for exactly this ("preview an effect live during playback"), but it
+    // could not be confirmed against this exact 1.11.0 artifact -- Media3 is published
+    // only to Google's Maven repo, which this sandbox has no network path to (same
+    // constraint noted throughout this README). If this doesn't compile, that's a
+    // signature/availability mismatch on this one call, not a problem with
+    // stackedFilterEffects() itself (which export already exercises).
+    LaunchedEffect(selectedClip?.id, selectedClip?.effects, selectedClip?.filter, previewMode) {
+        if (previewMode == PreviewMode.CLIP && selectedClip?.sourceType == MediaType.VIDEO) {
+            exoPlayer.setVideoEffects(CompositionBuilder.stackedFilterEffects(selectedClip.effectiveEffects()))
+        }
+    }
+
+    // Same gap, for speed: SetSpeed already updated the clip's data (and export already
+    // reads it via CompositionBuilder's setSpeed on the EditedMediaItem), but nothing
+    // ever told the live preview's ExoPlayer to actually play faster/slower, so picking
+    // a speed chip looked like it did nothing. setPlaybackSpeed is base Player API (not
+    // an effects/Transformer call), so unlike setVideoEffects above this one has no
+    // version-availability uncertainty.
+    LaunchedEffect(selectedClip?.id, selectedClip?.speed, previewMode) {
+        if (previewMode == PreviewMode.CLIP && selectedClip?.sourceType == MediaType.VIDEO) {
+            exoPlayer.setPlaybackSpeed(selectedClip.speed)
         }
     }
 
@@ -118,6 +204,47 @@ fun EditorScreen(
 
     var showTextDialog by remember { mutableStateOf(false) }
     var showAudioDialog by remember { mutableStateOf(false) }
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var showModelDownloadDialog by remember { mutableStateOf(false) }
+    var selectedAudioTrackId by remember { mutableStateOf<String?>(null) }
+
+    // EncryptedSharedPreferences.create() does real (small, but synchronous) file/
+    // Keystore I/O -- created once per screen via `remember`, not per recomposition.
+    // Only used to prefill/save a Hugging Face token for the one-time on-device model
+    // download (see ModelDownloadDialog below) -- unlike the Anthropic API key this
+    // replaced, nothing here is used on every AI request, only once per download.
+    val tokenStore = remember { ModelAccessTokenStore(context) }
+    val ramGb = remember { DeviceCapabilities.totalRamGb(context) }
+
+    // Timeline zoom: both lanes take this as their pixelsPerSecond, so zooming affects
+    // clips and audio blocks identically -- a given clip never looks a different length
+    // relative to the other lane. Shared scroll state so scrolling one lane moves the
+    // other too, rather than each scrolling independently.
+    var zoomFactor by remember { mutableFloatStateOf(1f) }
+    val pixelsPerSecond: Dp = BASE_PIXELS_PER_SECOND * zoomFactor
+    val timelineScrollState = rememberScrollState()
+
+    // Live position during "Play Timeline" playback, drawn as a playhead line on both
+    // lanes below. Null (no line drawn) outside that mode -- CLIP mode has no single
+    // project-wide position, just whichever moment the selected clip's own player is at.
+    var timelinePositionMs by remember { mutableStateOf(0L) }
+
+    // Where an audio track's reposition/trim drag snaps to: the start of the timeline,
+    // the end of every video clip (their "seams," since clips sit back-to-back with no
+    // gaps -- cumulative durationMs is exactly each clip's own start-of-next-clip point),
+    // and the playhead while one is showing. Recomputed only when one of those actually
+    // changes, not on every recomposition.
+    val snapPointsMs = remember(uiState.project.clips, previewMode, timelinePositionMs) {
+        buildList {
+            add(0L)
+            var acc = 0L
+            uiState.project.clips.forEach { clip ->
+                acc += clip.durationMs
+                add(acc)
+            }
+            if (previewMode == PreviewMode.TIMELINE) add(timelinePositionMs)
+        }
+    }
     var exportRequestId by remember { mutableStateOf<UUID?>(null) }
     var exportBlockedMessage by remember { mutableStateOf<String?>(null) }
     val workManager = remember { WorkManager.getInstance(context) }
@@ -127,8 +254,12 @@ fun EditorScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Edit project") },
-                navigationIcon = { TextButton(onClick = onBack) { Text("Back") } },
+                title = {
+                    TextButton(onClick = { showRenameDialog = true }) {
+                        Text(uiState.projectName, maxLines = 1)
+                    }
+                },
+                navigationIcon = { TextButton(onClick = ::saveAndBack) { Text("Back") } },
                 actions = {
                     TextButton(onClick = viewModel::undo, enabled = uiState.canUndo) { Text("Undo") }
                     TextButton(onClick = viewModel::redo, enabled = uiState.canRedo) { Text("Redo") }
@@ -148,6 +279,12 @@ fun EditorScreen(
             )
         }
     ) { padding ->
+        if (uiState.isLoading) {
+            Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+                CircularProgressIndicator(Modifier.align(Alignment.Center))
+            }
+            return@Scaffold
+        }
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -160,7 +297,8 @@ fun EditorScreen(
                 TimelinePreview(
                     composition = timelineComposition,
                     aspectRatio = uiState.project.aspectRatio.ratio,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    onPositionChanged = { timelinePositionMs = it }
                 )
             } else {
                 ClipPreview(
@@ -169,6 +307,10 @@ fun EditorScreen(
                     targetAspectRatio = uiState.project.aspectRatio.ratio,
                     onReframeCommitted = { focal ->
                         selectedClip?.let { viewModel.onCommand(EditCommand.SmartReframe(it.id, focal)) }
+                    },
+                    textOverlays = visibleTextOverlays,
+                    onTextPositionCommitted = { overlayId, x, y ->
+                        viewModel.onCommand(EditCommand.SetTextPosition(overlayId, x, y))
                     },
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -200,8 +342,11 @@ fun EditorScreen(
 
                 ClipStyleRow(
                     clip = selectedClip,
-                    onFilterSelected = { filter ->
-                        selectedClip?.let { viewModel.onCommand(EditCommand.ApplyFilter(filter, it.id)) }
+                    onFilterToggled = { filter ->
+                        selectedClip?.let { viewModel.onCommand(EditCommand.ToggleEffect(it.id, filter)) }
+                    },
+                    onEffectsReordered = { ordered ->
+                        selectedClip?.let { viewModel.onCommand(EditCommand.ReorderEffects(it.id, ordered)) }
                     },
                     onSpeedSelected = { speed ->
                         selectedClip?.let { viewModel.onCommand(EditCommand.SetSpeed(it.id, speed)) }
@@ -210,18 +355,50 @@ fun EditorScreen(
                         selectedClip?.let { viewModel.onCommand(EditCommand.SetClipVolume(it.id, volume)) }
                     }
                 )
+            }
 
-                TimelineStrip(
-                    clips = uiState.project.clips,
-                    selectedClipId = uiState.selectedClipId,
-                    onSelect = viewModel::selectClip,
-                    onReorder = { viewModel.onCommand(EditCommand.ReorderClips(it)) },
-                    onTrimCommitted = { clipId, start, end ->
-                        viewModel.onCommand(EditCommand.TrimClip(clipId, start, end))
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                )
+            // Always visible in both modes now (previously CLIP-mode only), so the
+            // playhead has somewhere to live during Timeline playback too, and the
+            // lanes/audio controls stay reachable while reviewing the whole project --
+            // matches the spec's "timeline is always visible below the preview" model
+            // rather than the editor swapping it out for a second full-screen mode.
+            ZoomRow(zoomFactor = zoomFactor, onZoomChange = { zoomFactor = it })
 
+            TimelineStrip(
+                clips = uiState.project.clips,
+                selectedClipId = uiState.selectedClipId,
+                onSelect = viewModel::selectClip,
+                onReorder = { viewModel.onCommand(EditCommand.ReorderClips(it)) },
+                onTrimCommitted = { clipId, start, end ->
+                    viewModel.onCommand(EditCommand.TrimClip(clipId, start, end))
+                },
+                modifier = Modifier.fillMaxWidth(),
+                pixelsPerSecond = pixelsPerSecond,
+                scrollState = timelineScrollState,
+                playheadMs = if (previewMode == PreviewMode.TIMELINE) timelinePositionMs else null,
+                transitionsAfterClipIds = transitionsAfterClipIds,
+                onToggleTransition = { afterClipId -> viewModel.onCommand(EditCommand.ToggleTransition(afterClipId)) }
+            )
+
+            // Drag a track left/right to reposition it, drag its right edge to trim
+            // how long it plays -- see AudioTrackStrip for why this is a Box of
+            // absolutely-positioned blocks rather than a Row like the video clips above.
+            AudioTrackStrip(
+                audioTracks = uiState.project.audioTracks,
+                selectedTrackId = selectedAudioTrackId,
+                projectDurationMs = uiState.project.durationMs,
+                onSelect = { selectedAudioTrackId = it },
+                onPositionCommitted = { trackId, start, duration ->
+                    viewModel.onCommand(EditCommand.SetAudioPosition(trackId, start, duration))
+                },
+                modifier = Modifier.fillMaxWidth(),
+                pixelsPerSecond = pixelsPerSecond,
+                scrollState = timelineScrollState,
+                playheadMs = if (previewMode == PreviewMode.TIMELINE) timelinePositionMs else null,
+                snapPointsMs = snapPointsMs
+            )
+
+            if (previewMode == PreviewMode.CLIP) {
                 OverlaysList(
                     textOverlays = uiState.project.textOverlays,
                     audioTracks = uiState.project.audioTracks,
@@ -231,7 +408,33 @@ fun EditorScreen(
                     onAudioLooping = { id, loop -> viewModel.onCommand(EditCommand.SetAudioLooping(id, loop)) }
                 )
             }
+
+            AiPromptBar(
+                isLoading = uiState.isAiLoading,
+                isModelReady = uiState.isModelReady,
+                ramGb = ramGb,
+                assistantMessage = uiState.aiMessage,
+                errorMessage = uiState.aiError,
+                onOpenModelSettings = { showModelDownloadDialog = true },
+                onSubmit = viewModel::submitAiPrompt,
+                onDismissFeedback = viewModel::clearAiFeedback
+            )
         }
+    }
+
+    if (showModelDownloadDialog) {
+        ModelDownloadDialog(
+            isModelReady = uiState.isModelReady,
+            isDownloading = uiState.isModelDownloading,
+            progress = uiState.modelDownloadProgress,
+            error = uiState.modelDownloadError,
+            initialToken = tokenStore.getToken().orEmpty(),
+            onDismiss = { showModelDownloadDialog = false },
+            onDownload = { token ->
+                tokenStore.setToken(token)
+                viewModel.downloadModel(token)
+            }
+        )
     }
 
     if (showTextDialog) {
@@ -257,6 +460,98 @@ fun EditorScreen(
                 showAudioDialog = false
             }
         )
+    }
+
+    if (showRenameDialog) {
+        RenameProjectDialog(
+            currentName = uiState.projectName,
+            onDismiss = { showRenameDialog = false },
+            onConfirm = { name ->
+                viewModel.renameProject(name)
+                showRenameDialog = false
+            }
+        )
+    }
+}
+
+@Composable
+private fun RenameProjectDialog(currentName: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+    var text by remember { mutableStateOf(currentName) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename project") },
+        text = { OutlinedTextField(value = text, onValueChange = { text = it }, singleLine = true) },
+        confirmButton = { TextButton(onClick = { onConfirm(text) }, enabled = text.isNotBlank()) { Text("Save") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
+}
+
+/**
+ * The AI layer's entire user-facing surface (architecture notes section 7): a prompt
+ * field, a send button, and whatever the last request's outcome was. Deliberately no
+ * chat history/thread -- each request is independent, working from whatever the
+ * PROJECT looks like right now (including the result of the previous AI edit, since
+ * that already lives in [ProjectState] by the time the next prompt goes out), not from
+ * a remembered conversation. Runs entirely on-device (see [ModelDownloadDialog]) --
+ * unlike the cloud version this replaced, there's no per-request credential, only a
+ * one-time model download gate. When the model isn't downloaded yet, this shows
+ * [ModelDownloadBanner] IN PLACE OF the (otherwise-disabled) prompt field, rather than
+ * a small "AI model" button next to a field the user can't actually use yet -- the
+ * banner is the whole point of the bar until the model exists.
+ */
+@Composable
+private fun AiPromptBar(
+    isLoading: Boolean,
+    isModelReady: Boolean,
+    ramGb: Double,
+    assistantMessage: String?,
+    errorMessage: String?,
+    onOpenModelSettings: () -> Unit,
+    onSubmit: (String) -> Unit,
+    onDismissFeedback: () -> Unit
+) {
+    if (!isModelReady) {
+        ModelDownloadBanner(ramGb = ramGb, onClick = onOpenModelSettings)
+        return
+    }
+    var prompt by remember { mutableStateOf("") }
+    Column(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            OutlinedTextField(
+                value = prompt,
+                onValueChange = { prompt = it },
+                modifier = Modifier.weight(1f),
+                placeholder = { Text("Describe an edit, e.g. \"make it black and white\"") },
+                singleLine = true,
+                enabled = !isLoading
+            )
+            TextButton(onClick = onOpenModelSettings) { Text("AI model") }
+            TextButton(
+                onClick = {
+                    onDismissFeedback()
+                    onSubmit(prompt)
+                    prompt = ""
+                },
+                enabled = !isLoading && prompt.isNotBlank()
+            ) { Text("Send") }
+        }
+        if (isLoading) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+                CircularProgressIndicator(modifier = Modifier.size(16.dp))
+                Text("Thinking...", modifier = Modifier.padding(start = 8.dp), style = MaterialTheme.typography.labelSmall)
+            }
+        }
+        assistantMessage?.let {
+            Text(it, modifier = Modifier.padding(top = 4.dp), style = MaterialTheme.typography.bodySmall)
+        }
+        errorMessage?.let {
+            Text(
+                "Error: $it",
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(top = 4.dp),
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
     }
 }
 
@@ -302,15 +597,27 @@ private val VOLUME_PRESETS = listOf(0f to "Mute", 0.5f to "50%", 1f to "100%")
  * Per-clip look and timing. Filters apply to photos and videos alike;
  * speed is video-only and the row says so rather than offering a control
  * that would be silently ignored.
+ *
+ * Filters are a reorderable STACK now (UX spec section 20, Tier 1), not a single
+ * choice -- the chip row is multi-select (tap toggles membership, not "replace the
+ * selection"), and a second row below it lets the order be changed when more than one
+ * is applied. Reordering uses up/down buttons rather than drag: this area already sits
+ * between two rounds' worth of real gesture-conflict bugs (audio drag, video trim), so
+ * adding a new drag surface here was judged not worth the risk this round -- the same
+ * reasoning the README's "Adopting the UX spec" section gives for holding back
+ * pinch-to-zoom. FilterType.NONE is left out of the chip row entirely -- an empty
+ * stack already means "no filter," so there's no separate sentinel chip to tap.
  */
 @Composable
 private fun ClipStyleRow(
     clip: VideoClip?,
-    onFilterSelected: (FilterType) -> Unit,
+    onFilterToggled: (FilterType) -> Unit,
+    onEffectsReordered: (List<FilterType>) -> Unit,
     onSpeedSelected: (Float) -> Unit,
     onVolumeSelected: (Float) -> Unit
 ) {
     if (clip == null) return
+    val appliedEffects = clip.effectiveEffects()
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
@@ -319,12 +626,48 @@ private fun ClipStyleRow(
                 .padding(horizontal = 8.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            FilterType.entries.forEach { filter ->
+            FilterType.entries.filter { it != FilterType.NONE }.forEach { filter ->
                 FilterChip(
-                    selected = filter == clip.filter,
-                    onClick = { onFilterSelected(filter) },
+                    selected = filter in appliedEffects,
+                    onClick = { onFilterToggled(filter) },
                     label = { Text(filter.name.lowercase().replaceFirstChar { it.uppercase() }) }
                 )
+            }
+        }
+        if (appliedEffects.size > 1) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text("Order:", modifier = Modifier.padding(end = 4.dp))
+                appliedEffects.forEachIndexed { index, filter ->
+                    Text(
+                        "${index + 1}. ${filter.name.lowercase().replaceFirstChar { it.uppercase() }}",
+                        modifier = Modifier.padding(end = 2.dp)
+                    )
+                    TextButton(
+                        enabled = index > 0,
+                        onClick = {
+                            val reordered = appliedEffects.toMutableList().apply {
+                                add(index - 1, removeAt(index))
+                            }
+                            onEffectsReordered(reordered)
+                        }
+                    ) { Text("↑") }
+                    TextButton(
+                        enabled = index < appliedEffects.lastIndex,
+                        onClick = {
+                            val reordered = appliedEffects.toMutableList().apply {
+                                add(index + 1, removeAt(index))
+                            }
+                            onEffectsReordered(reordered)
+                        }
+                    ) { Text("↓") }
+                }
             }
         }
         if (clip.sourceType == MediaType.VIDEO) {
@@ -359,6 +702,36 @@ private fun ClipStyleRow(
                 }
             }
         }
+    }
+}
+
+private const val MIN_ZOOM = 0.5f
+private const val MAX_ZOOM = 3f
+private const val ZOOM_STEP = 0.25f
+
+/** +/- zoom for the timeline lanes below, not pinch -- a pinch gesture over the same
+ *  area the trim/reorder/reposition drags already use is exactly the kind of overlapping-
+ *  gesture risk the last two rounds' bug reports came from; buttons carry none of that. */
+@Composable
+private fun ZoomRow(zoomFactor: Float, onZoomChange: (Float) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.End
+    ) {
+        TextButton(
+            onClick = { onZoomChange((zoomFactor - ZOOM_STEP).coerceAtLeast(MIN_ZOOM)) },
+            enabled = zoomFactor > MIN_ZOOM
+        ) { Text("−") }
+        Text(
+            "${(zoomFactor * 100).toInt()}%",
+            modifier = Modifier.align(Alignment.CenterVertically).padding(horizontal = 4.dp)
+        )
+        TextButton(
+            onClick = { onZoomChange((zoomFactor + ZOOM_STEP).coerceAtMost(MAX_ZOOM)) },
+            enabled = zoomFactor < MAX_ZOOM
+        ) { Text("+") }
     }
 }
 

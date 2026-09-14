@@ -26,6 +26,8 @@ import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
 import com.aimediaeditor.app.data.media.MediaType
 import com.aimediaeditor.app.editor.model.AudioTrack
+import com.aimediaeditor.app.editor.model.effectiveDurationMs
+import com.aimediaeditor.app.editor.model.effectiveEffects
 import com.aimediaeditor.app.editor.model.FilterType
 import com.aimediaeditor.app.editor.model.FocalPoint
 import com.aimediaeditor.app.editor.model.computeCropWindow
@@ -99,18 +101,23 @@ object CompositionBuilder {
      * axis flips, same as the crop conversion. Verified for all three position
      * presets plus both extremes: top maps above centre, centre to exactly 0,
      * bottom below centre.
+     *
+     * xPositionFraction (0 = left) becomes an NDC anchor with NO flip needed, unlike Y:
+     * NDC's X axis already increases left-to-right, the same direction xPositionFraction
+     * does, so 0->-1 (left), 0.5->0 (centre), 1->+1 (right) is a plain linear map.
      */
     private fun textOverlayEffect(overlays: List<TextOverlay>): OverlayEffect? {
         if (overlays.isEmpty()) return null
         val textureOverlays: List<TextureOverlay> = overlays.map { overlay ->
             val spannable = SpannableString(overlay.text)
+            val anchorX = 2f * overlay.xPositionFraction.coerceIn(0f, 1f) - 1f
             val anchorY = 1f - 2f * overlay.yPositionFraction.coerceIn(0f, 1f)
             val visible = StaticOverlaySettings.Builder()
-                .setBackgroundFrameAnchor(0f, anchorY)
+                .setBackgroundFrameAnchor(anchorX, anchorY)
                 .setAlphaScale(1f)
                 .build()
             val hidden = StaticOverlaySettings.Builder()
-                .setBackgroundFrameAnchor(0f, anchorY)
+                .setBackgroundFrameAnchor(anchorX, anchorY)
                 .setAlphaScale(0f)
                 .build()
             object : Media3TextOverlay() {
@@ -182,7 +189,7 @@ object CompositionBuilder {
      */
     private fun effectsFor(clip: VideoClip, targetAspectRatio: Float): Effects {
         val videoEffects = buildList<Effect> {
-            addAll(filterEffects(clip.filter))
+            addAll(stackedFilterEffects(clip.effectiveEffects()))
             cropEffectFor(clip, targetAspectRatio)?.let { add(it) }
         }
         val audioProcessors = buildList<AudioProcessor> {
@@ -193,13 +200,31 @@ object CompositionBuilder {
         return Effects(audioProcessors, videoEffects)
     }
 
-    private fun filterEffects(filter: FilterType): List<Effect> = when (filter) {
+    /**
+     * Not private: EditorScreen's live single-clip video preview reuses this exact
+     * mapping via `ExoPlayer.setVideoEffects()`. Reusing it (instead of a second
+     * hand-written mapping in the UI layer) is deliberate -- two implementations of
+     * "what a filter looks like" is exactly the shape of bug that produced the
+     * aspect-ratio/preview-vs-export divergence fixed in an earlier round.
+     */
+    internal fun filterEffects(filter: FilterType): List<Effect> = when (filter) {
         FilterType.NONE -> emptyList()
         FilterType.MONOCHROME -> listOf(RgbFilter.createGrayscaleFilter())
         FilterType.BRIGHT -> listOf(Brightness(0.25f))
         FilterType.CINEMATIC -> listOf(Contrast(0.25f))
         FilterType.VIVID -> listOf(Contrast(0.35f), Brightness(0.05f))
     }
+
+    /**
+     * A clip's full effect STACK (UX spec section 20, Tier 1), not just one filter --
+     * concatenates each filter's own [filterEffects] in order, since Media3 already
+     * applies a `List<Effect>` sequentially; stacking multiple named filters needs no
+     * combination math beyond concatenation, the same mechanism VIVID already uses to
+     * combine Contrast+Brightness into a single filter's own effect list. Also not
+     * private for the same live-preview-reuse reason as [filterEffects] above.
+     */
+    internal fun stackedFilterEffects(filters: List<FilterType>): List<Effect> =
+        filters.flatMap { filterEffects(it) }
 
     /**
      * The project's aspect ratio, applied for real -- and applied around
@@ -289,13 +314,31 @@ object CompositionBuilder {
      *   -- Media3's own words, not a hedge added here.
      */
     private fun buildAudioSequence(track: AudioTrack, projectDurationMs: Long): EditedMediaItemSequence {
-        val durationUs = if (track.sourceDurationMs > 0L) {
-            track.sourceDurationMs * 1000L
-        } else {
-            projectDurationMs.coerceAtLeast(1000L) * 1000L
+        // effectiveDurationMs is the single source of truth for "how long does this
+        // track play" -- shared with the audio timeline strip's UI, so export can never
+        // disagree with what the user saw and dragged.
+        val effectiveDuration = track.effectiveDurationMs(projectDurationMs)
+        val mediaItemBuilder = MediaItem.Builder().setUri(Uri.parse(track.sourceUri))
+
+        // Actually clip the source to the user-trimmed length via ClippingConfiguration --
+        // the same mechanism buildVideoItem uses for video trims -- rather than relying on
+        // setDurationUs alone. setDurationUs is documented as a fallback for when a
+        // duration can't be read from the source itself (images, an unknown-length
+        // stream); for a real audio file Media3 can decode a length from, it's very
+        // unlikely to be treated as an active trim, so it can't be what shortens
+        // playback here. Only applied when there's an actual known source length to clip
+        // against and the user has trimmed shorter than it.
+        if (track.sourceDurationMs > 0L && effectiveDuration < track.sourceDurationMs) {
+            mediaItemBuilder.setClippingConfiguration(
+                MediaItem.ClippingConfiguration.Builder()
+                    .setStartPositionMs(0L)
+                    .setEndPositionMs(effectiveDuration)
+                    .build()
+            )
         }
-        val audioItemBuilder = EditedMediaItem.Builder(MediaItem.fromUri(Uri.parse(track.sourceUri)))
-            .setDurationUs(durationUs)
+
+        val audioItemBuilder = EditedMediaItem.Builder(mediaItemBuilder.build())
+            .setDurationUs(effectiveDuration * 1000L)
         if (track.volume != 1f) {
             audioItemBuilder.setEffects(
                 Effects(listOf(volumeProcessor(track.volume)), /* videoEffects= */ emptyList())

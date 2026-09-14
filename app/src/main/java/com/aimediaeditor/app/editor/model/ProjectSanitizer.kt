@@ -24,6 +24,7 @@ object ProjectSanitizer {
     private const val MAX_VOLUME = 2f
     private const val MIN_SPEED = 0.25f
     private const val MAX_SPEED = 4f
+    private const val MIN_AUDIO_DURATION_MS = 300L
 
     fun apply(state: ProjectState, command: EditCommand): ProjectState = when (command) {
 
@@ -58,10 +59,24 @@ object ProjectSanitizer {
 
         is EditCommand.SetAspectRatio -> state.copy(aspectRatio = command.ratio)
 
-        is EditCommand.ApplyFilter -> if (command.clipId == null) {
-            state.copy(clips = state.clips.map { it.copy(filter = command.filter) })
-        } else {
-            state.mapClip(command.clipId) { it.copy(filter = command.filter) }
+        is EditCommand.ToggleEffect -> state.mapClip(command.clipId) { clip ->
+            val current = clip.effectiveEffects()
+            val updated = if (command.filter in current) current - command.filter else current + command.filter
+            // Once a clip's effects have been touched under the new model, the legacy
+            // single-filter field is cleared -- effects becomes the only live source of
+            // truth for this clip from here on (see effectiveEffects() in ProjectState).
+            clip.copy(effects = updated, filter = FilterType.NONE)
+        }
+
+        is EditCommand.ReorderEffects -> state.mapClip(command.clipId) { clip ->
+            val current = clip.effectiveEffects()
+            // Only reorder filters that are actually applied -- an entry the caller
+            // listed that isn't currently on the stack is dropped, not added; any
+            // currently-applied filter the caller's list omitted keeps its relative
+            // order, appended after the ones the caller did place.
+            val reordered = command.orderedFilters.filter { it in current } +
+                current.filterNot { it in command.orderedFilters }
+            clip.copy(effects = reordered, filter = FilterType.NONE)
         }
 
         is EditCommand.SmartReframe -> state.mapClip(command.clipId) {
@@ -92,7 +107,11 @@ object ProjectSanitizer {
                 sourceUri = command.sourceUri,
                 startMs = command.startMs.coerceIn(0, state.durationMs.coerceAtLeast(0)),
                 volume = command.volume.coerceIn(0f, MAX_VOLUME),
-                sourceDurationMs = command.sourceDurationMs
+                sourceDurationMs = command.sourceDurationMs,
+                // Starts at its full source length (previous behaviour, before the
+                // audio timeline strip existed) -- the user can drag to trim it from there.
+                durationMs = command.sourceDurationMs.takeIf { it > 0L }
+                    ?: state.durationMs.coerceAtLeast(MIN_AUDIO_DURATION_MS)
             )
         )
 
@@ -122,11 +141,61 @@ object ProjectSanitizer {
             }
         )
 
+        is EditCommand.SetAudioPosition -> state.copy(
+            audioTracks = state.audioTracks.map { track ->
+                if (track.id != command.trackId) return@map track
+                // Duration can't exceed the source's own length -- Media3 needs a real
+                // stretch of the source file to play for one cycle; looping repeats that
+                // cycle rather than making a single cycle longer than the source itself.
+                val maxDuration = (track.sourceDurationMs.takeIf { it > 0L } ?: state.durationMs)
+                    .coerceAtLeast(MIN_AUDIO_DURATION_MS)
+                track.copy(
+                    startMs = command.startMs.coerceIn(0L, state.durationMs.coerceAtLeast(0L)),
+                    durationMs = command.durationMs.coerceIn(MIN_AUDIO_DURATION_MS, maxDuration)
+                )
+            }
+        )
+
+        is EditCommand.SetTextPosition -> state.copy(
+            textOverlays = state.textOverlays.map {
+                if (it.id == command.overlayId) {
+                    it.copy(
+                        xPositionFraction = command.xFraction.coerceIn(0f, 1f),
+                        yPositionFraction = command.yFraction.coerceIn(0f, 1f)
+                    )
+                } else {
+                    it
+                }
+            }
+        )
+
         is EditCommand.RemoveTextOverlay ->
             state.copy(textOverlays = state.textOverlays.filterNot { it.id == command.overlayId })
 
         is EditCommand.RemoveAudioTrack ->
             state.copy(audioTracks = state.audioTracks.filterNot { it.id == command.trackId })
+
+        is EditCommand.ToggleTransition -> {
+            val index = state.clips.indexOfFirst { it.id == command.afterClipId }
+            val hasNextClip = index != -1 && index < state.clips.lastIndex
+            if (!hasNextClip) {
+                state // nothing after this clip to transition into -- safe no-op
+            } else if (state.transitions.any { it.afterClipId == command.afterClipId }) {
+                state.copy(transitions = state.transitions.filterNot { it.afterClipId == command.afterClipId })
+            } else {
+                state.copy(transitions = state.transitions + ClipTransition(afterClipId = command.afterClipId))
+            }
+        }
+
+        is EditCommand.SetTransitionDuration -> state.copy(
+            transitions = state.transitions.map {
+                if (it.afterClipId == command.afterClipId) {
+                    it.copy(durationMs = command.durationMs.coerceIn(MIN_TRANSITION_DURATION_MS, MAX_TRANSITION_DURATION_MS))
+                } else {
+                    it
+                }
+            }
+        )
     }
 
     private fun ProjectState.mapClip(clipId: String, transform: (VideoClip) -> VideoClip): ProjectState =
@@ -149,7 +218,16 @@ object ProjectSanitizer {
             removeAt(index)
             addAll(index, listOf(first, second))
         }
-        return copy(clips = newClips)
+        // A transition attached to the ORIGINAL clip's boundary with whatever came
+        // after it belongs after the SECOND half now -- the piece actually adjacent to
+        // that original neighbour. Leaving it keyed to the original id (now the FIRST
+        // half) would silently move it to sit between the two new halves instead: a
+        // surprise fade-to-black in the middle of what the user just split, not where
+        // they had it before.
+        val newTransitions = transitions.map {
+            if (it.afterClipId == clipId) it.copy(afterClipId = second.id) else it
+        }
+        return copy(clips = newClips, transitions = newTransitions)
     }
 
     /**

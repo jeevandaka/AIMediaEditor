@@ -24,6 +24,8 @@ import androidx.media3.transformer.CompositionPlayer
 import androidx.media3.ui.compose.PlayerSurface
 import androidx.media3.ui.compose.material3.buttons.PlayPauseButton
 import androidx.media3.ui.compose.material3.indicator.ProgressSlider
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 
 /**
  * Whole-project sequential playback -- every clip in order, respecting
@@ -50,7 +52,8 @@ import androidx.media3.ui.compose.material3.indicator.ProgressSlider
 fun TimelinePreview(
     composition: Composition?,
     aspectRatio: Float,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onPositionChanged: (Long) -> Unit = {}
 ) {
     val context = LocalContext.current
     val player = remember { CompositionPlayer.Builder(context).build() }
@@ -64,6 +67,18 @@ fun TimelinePreview(
         if (composition != null) {
             player.setComposition(composition)
             player.prepare()
+        }
+    }
+
+    // Player doesn't push continuous position updates via listener callbacks (only
+    // discrete events like media-item transitions) -- polling is the standard way to
+    // drive a live-updating position, same as what ProgressSlider below almost certainly
+    // does internally for its own seek bar. 100ms is frequent enough for a playhead to
+    // read as smooth without polling every frame.
+    LaunchedEffect(player) {
+        while (isActive) {
+            onPositionChanged(player.currentPosition)
+            delay(100)
         }
     }
 

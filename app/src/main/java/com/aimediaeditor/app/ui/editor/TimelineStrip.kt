@@ -1,5 +1,8 @@
 package com.aimediaeditor.app.ui.editor
 
+import android.graphics.Bitmap
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -8,7 +11,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -17,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -26,21 +32,50 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import coil3.compose.AsyncImage
 import com.aimediaeditor.app.data.media.MediaType
+import com.aimediaeditor.app.data.media.VideoThumbnailLoader
 import com.aimediaeditor.app.editor.model.VideoClip
 import com.aimediaeditor.app.editor.model.maxTrimEndMs
 
-private val PIXELS_PER_SECOND = 56.dp
-private val MIN_CLIP_WIDTH = 40.dp
+// Not private: AudioTrackStrip shares this exact scale so a given timestamp lines up
+// at the same horizontal offset in both the video row and the audio lane below it. This
+// is the 1x-zoom value -- EditorScreen scales it by the user's chosen zoom factor and
+// passes the result down as each composable's `pixelsPerSecond` parameter, so nothing in
+// either lane hardcodes a fixed scale any more.
+internal val BASE_PIXELS_PER_SECOND = 56.dp
+// Must stay wide enough that the reorder grip (22.dp, centered) and both trim handles
+// (14.dp each, at the edges) never overlap -- 14+22+14 = 50.dp is the exact minimum with
+// zero clearance; below that, a short clip's reorder grip and trim handle physically
+// share pixels, so touches near an edge could be claimed by either detectDragGestures,
+// and which one wins isn't guaranteed. 64.dp leaves real clearance on both sides.
+internal val MIN_CLIP_WIDTH = 64.dp
 private const val MIN_CLIP_DURATION_MS = 200L
+
+// Filmstrip tiling: aim for one frame roughly every 40.dp of clip width, capped at 8 so a
+// long clip doesn't extract dozens of frames -- past 8 tiles the individual tiles get
+// wider instead, still evenly covering the clip, just each one spanning more time.
+private val FILMSTRIP_TILE_WIDTH = 40.dp
+private const val MAX_FILMSTRIP_TILES = 8
+
+/** mm:ss -- not private: AudioTrackStrip uses the same format for its own position label. */
+internal fun formatClock(ms: Long): String {
+    val totalSeconds = (ms / 1000L).coerceAtLeast(0L)
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return "%d:%02d".format(minutes, seconds)
+}
 
 /**
  * A plain (non-Lazy) horizontally scrollable Row -- there's no need for
@@ -57,74 +92,129 @@ fun TimelineStrip(
     onSelect: (String) -> Unit,
     onReorder: (List<String>) -> Unit,
     onTrimCommitted: (clipId: String, startMs: Long, endMs: Long) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    pixelsPerSecond: Dp = BASE_PIXELS_PER_SECOND,
+    scrollState: ScrollState = rememberScrollState(),
+    playheadMs: Long? = null,
+    // Clip ids that currently have an active (effective) transition after them --
+    // drives which toggle between two clips renders as "on." A plain Set, not the raw
+    // ClipTransition list, since this composable only needs membership, not duration.
+    transitionsAfterClipIds: Set<String> = emptySet(),
+    onToggleTransition: (afterClipId: String) -> Unit = {}
 ) {
     var order by remember(clips.map { it.id }) { mutableStateOf(clips.map { it.id }) }
     var bounds by remember { mutableStateOf(mapOf<String, ClosedRange<Float>>()) }
     var draggingId by remember { mutableStateOf<String?>(null) }
     var dragOffsetPx by remember { mutableFloatStateOf(0f) }
 
-    Row(
+    // Scroll lives on this outer Box, not the Row, so the playhead line below can be a
+    // second child of the SAME scrollable box -- it then scrolls together with the clips
+    // and stays pinned to the correct timestamp, rather than needing the Row itself to
+    // host an absolutely-positioned overlay on top of its own sequential children.
+    Box(
         modifier = modifier
-            .horizontalScroll(rememberScrollState())
+            .horizontalScroll(scrollState)
             .height(96.dp)
-            .padding(vertical = 8.dp, horizontal = 4.dp)
     ) {
-        for (clipId in order) {
-            val clip = clips.firstOrNull { it.id == clipId } ?: continue
-            val isDragging = clipId == draggingId
+        Row(modifier = Modifier.padding(vertical = 8.dp, horizontal = 4.dp)) {
+            order.forEachIndexed { index, clipId ->
+                val clip = clips.firstOrNull { it.id == clipId } ?: return@forEachIndexed
+                val isDragging = clipId == draggingId
 
-            Box(
-                modifier = Modifier
-                    .onGloballyPositioned { coords ->
-                        val left = coords.positionInParent().x
-                        bounds = bounds + (clipId to (left..(left + coords.size.width)))
-                    }
-                    .graphicsLayer { translationX = if (isDragging) dragOffsetPx else 0f }
-                    .zIndex(if (isDragging) 1f else 0f)
-            ) {
-                ClipItem(
-                    clip = clip,
-                    isSelected = clipId == selectedClipId,
-                    onSelect = { onSelect(clipId) },
-                    onTrimCommitted = { start, end -> onTrimCommitted(clipId, start, end) }
-                )
-
-                // Dedicated grip handle for reordering -- a separate touch target from
-                // tap-to-select and the trim handles, so none of the three gestures compete.
                 Box(
                     modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .size(22.dp)
-                        .pointerInput(clipId, order) {
-                            detectDragGestures(
-                                onDragStart = { draggingId = clipId; dragOffsetPx = 0f },
-                                onDragEnd = { onReorder(order); draggingId = null; dragOffsetPx = 0f },
-                                onDragCancel = { draggingId = null; dragOffsetPx = 0f }
-                            ) { change, dragAmount ->
-                                change.consume()
-                                dragOffsetPx += dragAmount.x
-                                val myBounds = bounds[clipId] ?: return@detectDragGestures
-                                val myCenter = (myBounds.start + myBounds.endInclusive) / 2f + dragOffsetPx
-                                val currentIndex = order.indexOf(clipId)
-                                val neighborIndex = if (dragOffsetPx > 0) currentIndex + 1 else currentIndex - 1
-                                val neighborId = order.getOrNull(neighborIndex) ?: return@detectDragGestures
-                                val neighborBounds = bounds[neighborId] ?: return@detectDragGestures
-                                val neighborCenter = (neighborBounds.start + neighborBounds.endInclusive) / 2f
-                                val crossed = if (dragOffsetPx > 0) myCenter > neighborCenter else myCenter < neighborCenter
-                                if (crossed) {
-                                    val fromIdx = order.indexOf(clipId)
-                                    order = order.toMutableList().apply { add(neighborIndex, removeAt(fromIdx)) }
-                                    val travelled = neighborBounds.endInclusive - neighborBounds.start
-                                    dragOffsetPx -= if (dragOffsetPx > 0) travelled else -travelled
+                        .onGloballyPositioned { coords ->
+                            val left = coords.positionInParent().x
+                            bounds = bounds + (clipId to (left..(left + coords.size.width)))
+                        }
+                        .graphicsLayer { translationX = if (isDragging) dragOffsetPx else 0f }
+                        .zIndex(if (isDragging) 1f else 0f)
+                ) {
+                    ClipItem(
+                        clip = clip,
+                        isSelected = clipId == selectedClipId,
+                        onSelect = { onSelect(clipId) },
+                        onTrimCommitted = { start, end -> onTrimCommitted(clipId, start, end) },
+                        pixelsPerSecond = pixelsPerSecond
+                    )
+
+                    // Dedicated grip handle for reordering -- a separate touch target from
+                    // tap-to-select and the trim handles, so none of the three gestures compete.
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .size(22.dp)
+                            .pointerInput(clipId, order) {
+                                detectDragGestures(
+                                    onDragStart = { draggingId = clipId; dragOffsetPx = 0f },
+                                    onDragEnd = { onReorder(order); draggingId = null; dragOffsetPx = 0f },
+                                    onDragCancel = { draggingId = null; dragOffsetPx = 0f }
+                                ) { change, dragAmount ->
+                                    change.consume()
+                                    dragOffsetPx += dragAmount.x
+                                    val myBounds = bounds[clipId] ?: return@detectDragGestures
+                                    val myCenter = (myBounds.start + myBounds.endInclusive) / 2f + dragOffsetPx
+                                    val currentIndex = order.indexOf(clipId)
+                                    val neighborIndex = if (dragOffsetPx > 0) currentIndex + 1 else currentIndex - 1
+                                    val neighborId = order.getOrNull(neighborIndex) ?: return@detectDragGestures
+                                    val neighborBounds = bounds[neighborId] ?: return@detectDragGestures
+                                    val neighborCenter = (neighborBounds.start + neighborBounds.endInclusive) / 2f
+                                    val crossed = if (dragOffsetPx > 0) myCenter > neighborCenter else myCenter < neighborCenter
+                                    if (crossed) {
+                                        val fromIdx = order.indexOf(clipId)
+                                        order = order.toMutableList().apply { add(neighborIndex, removeAt(fromIdx)) }
+                                        val travelled = neighborBounds.endInclusive - neighborBounds.start
+                                        dragOffsetPx -= if (dragOffsetPx > 0) travelled else -travelled
+                                    }
                                 }
                             }
-                        }
-                ) {
-                    Text("\u2261", color = Color.White, style = MaterialTheme.typography.titleMedium)
+                    ) {
+                        Text("\u2261", color = Color.White, style = MaterialTheme.typography.titleMedium)
+                    }
+                }
+
+                // A small tap target between two adjacent clips, not a drag -- unlike
+                // the reorder grip and trim handles above, this is tap-only, so it adds
+                // no new gesture surface to an area that already produced two rounds of
+                // real gesture-conflict bugs (audio drag, video trim). Only rendered
+                // between clips (never after the last one -- there's nothing to
+                // transition into).
+                if (index < order.lastIndex) {
+                    TransitionToggle(
+                        isActive = clipId in transitionsAfterClipIds,
+                        onClick = { onToggleTransition(clipId) }
+                    )
                 }
             }
         }
+
+        if (playheadMs != null) {
+            Playhead(playheadMs, pixelsPerSecond)
+        }
+    }
+}
+
+/**
+ * The tappable divider between two adjacent clips that toggles a fade-to-black
+ * transition on/off at that boundary (UX spec section 25, Tier 1). Narrow (18.dp) on
+ * purpose -- wide enough to tap reliably, narrow enough not to visually compete with
+ * the clips themselves for space on an already-dense timeline row.
+ */
+@Composable
+private fun TransitionToggle(isActive: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxHeight()
+            .width(18.dp)
+            .background(if (isActive) Color(0xFFE94560) else Color.DarkGray.copy(alpha = 0.3f))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            if (isActive) "◐" else "·",
+            color = Color.White,
+            style = MaterialTheme.typography.titleMedium
+        )
     }
 }
 
@@ -133,10 +223,11 @@ private fun ClipItem(
     clip: VideoClip,
     isSelected: Boolean,
     onSelect: () -> Unit,
-    onTrimCommitted: (startMs: Long, endMs: Long) -> Unit
+    onTrimCommitted: (startMs: Long, endMs: Long) -> Unit,
+    pixelsPerSecond: Dp
 ) {
     val density = LocalDensity.current
-    val pixelsPerMs = with(density) { PIXELS_PER_SECOND.toPx() } / 1000f
+    val pixelsPerMs = with(density) { pixelsPerSecond.toPx() } / 1000f
     val trimmedDurationMs = clip.trimEndMs - clip.trimStartMs
     val widthDp = with(density) {
         (trimmedDurationMs * pixelsPerMs).toDp().coerceAtLeast(MIN_CLIP_WIDTH)
@@ -172,11 +263,54 @@ private fun ClipItem(
                     .background(Color.Black.copy(alpha = 0.5f))
             )
         } else {
+            // A real filmstrip -- several frames tiled across the clip's width, each one
+            // sampled from its own slice of the CURRENTLY TRIMMED range -- not one frame
+            // stretched/cropped to cover the whole clip regardless of length. One frame
+            // per slice is what actually represents "what happens across this clip";
+            // a single frame just shows one moment no matter how long the clip is.
+            // Re-fetched when the trim is committed, not on every pixel of a live drag --
+            // extracting several frames isn't instant, so doing it mid-gesture would be
+            // janky rather than helpful.
+            val context = LocalContext.current
+            val tileCount = remember(widthDp) {
+                kotlin.math.ceil(widthDp / FILMSTRIP_TILE_WIDTH).toInt().coerceIn(1, MAX_FILMSTRIP_TILES)
+            }
+            var filmstrip by remember(clip.id) { mutableStateOf<List<Bitmap?>>(emptyList()) }
+            LaunchedEffect(clip.sourceUri, clip.trimStartMs, clip.trimEndMs, tileCount) {
+                filmstrip = VideoThumbnailLoader.loadFilmstrip(
+                    context,
+                    android.net.Uri.parse(clip.sourceUri),
+                    startMs = clip.trimStartMs,
+                    endMs = clip.trimEndMs,
+                    tileCount = tileCount
+                )
+            }
+            Row(modifier = Modifier.fillMaxSize()) {
+                repeat(tileCount) { i ->
+                    val bmp = filmstrip.getOrNull(i)
+                    Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                        if (bmp != null) {
+                            Image(
+                                bitmap = bmp.asImageBitmap(),
+                                contentDescription = null,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop
+                            )
+                        }
+                    }
+                }
+            }
+            // Start -> end, not just duration -- updates live while dragging a trim
+            // handle, so the exact moment being trimmed to is always visible instead of
+            // needing to let go and check. mm:ss to match what other editors show here,
+            // per the report that this lane read as a solid, unlabelled block before.
             Text(
-                "\u25B6 %.1fs".format(trimmedDurationMs / 1000f),
+                "${formatClock(liveStart)} \u2192 ${formatClock(liveEnd)}",
                 color = Color.White,
                 style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.align(Alignment.Center)
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .background(Color.Black.copy(alpha = 0.6f))
             )
         }
 
@@ -201,12 +335,68 @@ private fun ClipItem(
     }
 }
 
-/** BoxScope extension so it can align itself to either edge of the caller's Box. */
+/** A 2.dp vertical line at [positionMs] -- shared by [Playhead] and [SnapGuide] so both
+ *  lanes' lines are pinned the same way: within each lane's OWN scrollable content rather
+ *  than a shared screen position, so they stay correct regardless of that lane's current
+ *  scroll offset (see README on why the two lanes' independent scrolling matters here). */
 @Composable
-private fun BoxScope.TrimHandle(
+private fun BoxScope.TimelineMarkerLine(positionMs: Long, pixelsPerSecond: Dp, color: Color) {
+    val density = LocalDensity.current
+    val pixelsPerMs = with(density) { pixelsPerSecond.toPx() } / 1000f
+    val x = with(density) { (positionMs * pixelsPerMs).toDp() }
+    Box(
+        modifier = Modifier
+            .offset(x = x)
+            .width(2.dp)
+            .fillMaxHeight()
+            .background(color)
+    )
+}
+
+/** Not private: AudioTrackStrip draws the identical line at the identical timestamp, so
+ *  the two lanes' playheads visually agree. */
+@Composable
+internal fun BoxScope.Playhead(positionMs: Long, pixelsPerSecond: Dp) {
+    TimelineMarkerLine(positionMs, pixelsPerSecond, Color.Red)
+}
+
+/** Shown only while a drag (audio reposition/trim) is actively snapped to a clip
+ * boundary/playhead/timeline start -- visual confirmation that a snap happened, matching
+ * UX spec section 8/17's "show snapping guides," rather than the value silently jumping
+ * with no feedback. Not private: AudioTrackStrip is the current caller. */
+@Composable
+internal fun BoxScope.SnapGuide(positionMs: Long, pixelsPerSecond: Dp) {
+    TimelineMarkerLine(positionMs, pixelsPerSecond, Color.Yellow)
+}
+
+private const val SNAP_THRESHOLD_PX = 16f
+
+/**
+ * Snaps [valueMs] to the nearest of [points] if within [thresholdMs], returning the
+ * (possibly unchanged) value alongside the snap point used for a guide line, or null if
+ * nothing was close enough to snap to. Not private: AudioTrackStrip's reposition/trim
+ * drags use this against video clip boundaries -- the two live in the same project-
+ * timeline coordinate space (a clip's own trim handles don't: they edit source-relative
+ * time within one file, which has no "other clip's edge" to snap to, so this isn't
+ * applied there this round).
+ */
+internal fun snapToNearest(valueMs: Long, points: List<Long>, thresholdMs: Long): Pair<Long, Long?> {
+    val nearest = points.minByOrNull { kotlin.math.abs(it - valueMs) } ?: return valueMs to null
+    return if (kotlin.math.abs(nearest - valueMs) <= thresholdMs) nearest to nearest else valueMs to null
+}
+
+/** [SNAP_THRESHOLD_PX] converted to a millisecond tolerance at the current zoom -- not
+ *  private: AudioTrackStrip needs the same conversion for its own snap calls. */
+internal fun snapThresholdMs(pixelsPerMs: Float): Long = (SNAP_THRESHOLD_PX / pixelsPerMs).toLong()
+
+/** BoxScope extension so it can align itself to either edge of the caller's Box. Not
+ *  private: AudioTrackStrip reuses this exact handle for the same drag-to-trim feel. */
+@Composable
+internal fun BoxScope.TrimHandle(
     alignment: Alignment,
     onDrag: (deltaPx: Float) -> Unit,
-    onDragEnd: () -> Unit
+    onDragEnd: () -> Unit,
+    onDragCancel: () -> Unit = {}
 ) {
     Box(
         modifier = Modifier
@@ -217,7 +407,7 @@ private fun BoxScope.TrimHandle(
             .pointerInput(Unit) {
                 detectDragGestures(
                     onDragEnd = onDragEnd,
-                    onDragCancel = {}
+                    onDragCancel = onDragCancel
                 ) { change, dragAmount ->
                     change.consume()
                     onDrag(dragAmount.x)
