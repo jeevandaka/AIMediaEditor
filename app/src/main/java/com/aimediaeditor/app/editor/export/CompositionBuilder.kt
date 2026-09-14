@@ -2,6 +2,8 @@
 
 package com.aimediaeditor.app.editor.export
 
+import android.graphics.Bitmap
+import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.text.SpannableString
 import androidx.media3.common.C
@@ -12,6 +14,7 @@ import androidx.media3.common.audio.ChannelMixingAudioProcessor
 import androidx.media3.common.audio.ChannelMixingMatrix
 import androidx.media3.common.audio.SpeedProvider
 import androidx.media3.common.OverlaySettings
+import androidx.media3.effect.BitmapOverlay
 import androidx.media3.effect.Crop
 import androidx.media3.effect.OverlayEffect
 import androidx.media3.effect.StaticOverlaySettings
@@ -27,8 +30,10 @@ import androidx.media3.transformer.EditedMediaItemSequence
 import com.aimediaeditor.app.data.media.MediaType
 import com.aimediaeditor.app.editor.model.AudioTrack
 import com.aimediaeditor.app.editor.model.effectiveDurationMs
+import com.aimediaeditor.app.editor.model.effectiveTransitions
 import com.aimediaeditor.app.editor.model.FilterType
 import com.aimediaeditor.app.editor.model.FocalPoint
+import com.aimediaeditor.app.editor.model.clipStartOffsetMs
 import com.aimediaeditor.app.editor.model.computeCropWindow
 import com.aimediaeditor.app.editor.model.ratio
 import com.aimediaeditor.app.editor.model.toNdcCrop
@@ -36,6 +41,7 @@ import com.aimediaeditor.app.editor.model.ProjectState
 import com.aimediaeditor.app.editor.model.TextOverlay
 import com.aimediaeditor.app.editor.model.VideoClip
 import com.google.common.collect.ImmutableList
+import kotlin.math.abs
 
 /**
  * Turns a [ProjectState] into the Media3 structure both Transformer
@@ -75,20 +81,24 @@ object CompositionBuilder {
         val audioSequences = project.audioTracks.map { buildAudioSequence(it, project.durationMs) }
         val builder = Composition.Builder(listOf(visualSequence) + audioSequences)
 
-        // Text overlays are positioned on the PROJECT timeline, not inside any
-        // one clip -- so they attach to the Composition rather than to an
-        // EditedMediaItem. That's what makes the timestamps line up without
-        // having to work out which clip contains each overlay and convert to
-        // clip-relative time (the TimestampWrapper approach I'd flagged as the
-        // hard part; attaching at composition level avoids it entirely).
-        textOverlayEffect(project.textOverlays)?.let { overlayEffect ->
-            builder.setEffects(Effects(/* audioProcessors= */ emptyList(), listOf(overlayEffect)))
+        // Text overlays AND transitions are both positioned on the PROJECT timeline,
+        // not inside any one clip -- so both attach to the Composition rather than to
+        // an EditedMediaItem, and both go into the SAME OverlayEffect (Media3 composes
+        // one list of TextureOverlays, not one effect per overlay type). That's what
+        // makes the timestamps line up without having to work out which clip contains
+        // each overlay/transition and convert to clip-relative time.
+        val overlayTextures = textOverlayTextures(project.textOverlays) + transitionOverlayTextures(project)
+        if (overlayTextures.isNotEmpty()) {
+            builder.setEffects(Effects(/* audioProcessors= */ emptyList(), listOf(OverlayEffect(ImmutableList.copyOf(overlayTextures)))))
         }
         return builder.build()
     }
 
     /**
-     * Burns the project's text overlays into the rendered output.
+     * Builds the [TextureOverlay] list for the project's text overlays (not an
+     * [OverlayEffect] directly -- [build] combines this with [transitionOverlayTextures]
+     * into one shared effect, since Media3 composes one overlay list, not one effect per
+     * overlay type).
      *
      * Each overlay keeps ONE constant SpannableString and toggles its alpha
      * between 1 and 0 depending on whether the current timestamp falls in its
@@ -105,9 +115,8 @@ object CompositionBuilder {
      * NDC's X axis already increases left-to-right, the same direction xPositionFraction
      * does, so 0->-1 (left), 0.5->0 (centre), 1->+1 (right) is a plain linear map.
      */
-    private fun textOverlayEffect(overlays: List<TextOverlay>): OverlayEffect? {
-        if (overlays.isEmpty()) return null
-        val textureOverlays: List<TextureOverlay> = overlays.map { overlay ->
+    private fun textOverlayTextures(overlays: List<TextOverlay>): List<TextureOverlay> =
+        overlays.map { overlay ->
             val spannable = SpannableString(overlay.text)
             val anchorX = 2f * overlay.xPositionFraction.coerceIn(0f, 1f) - 1f
             val anchorY = 1f - 2f * overlay.yPositionFraction.coerceIn(0f, 1f)
@@ -127,8 +136,55 @@ object CompositionBuilder {
                 }
             }
         }
-        return OverlayEffect(ImmutableList.copyOf(textureOverlays))
+
+    /**
+     * Solid black, sized to at least cover any resolution this app exports at (720p or
+     * 1080p -- see ExportWorker), so [transitionOverlayTextures] can rely on the
+     * bitmap's own native pixel size to cover the frame at its default (no-scale)
+     * overlay size, rather than depending on exactly how StaticOverlaySettings' scale
+     * multiplier maps onto the target frame -- that part, unlike the alpha/anchor
+     * mechanism already confirmed by the text overlay feature above, could not be
+     * confirmed against this exact 1.11.0 artifact (same category of honest risk this
+     * file already flags for HslAdjustment). Created once, not per frame:
+     * BitmapOverlay's contract calls getBitmap(presentationTimeUs) on every frame, and
+     * a fresh 1920x1080 Bitmap each time would be a real, pointless allocation/GC cost
+     * for a value that's identical every time.
+     */
+    private val transitionBlackBitmap: Bitmap by lazy {
+        Bitmap.createBitmap(1920, 1080, Bitmap.Config.ARGB_8888).apply { eraseColor(AndroidColor.BLACK) }
     }
+
+    /**
+     * Builds the [TextureOverlay] list for the project's transitions (see [build] for
+     * why this returns a list to be merged with the text overlays, not its own
+     * [OverlayEffect]). Only [ProjectState.effectiveTransitions] are rendered -- a
+     * transition whose clip was deleted, or that's no longer followed by another clip,
+     * is silently inert rather than rendering somewhere unintended.
+     *
+     * Each transition is a symmetric "dip to black": alpha ramps 0 -> 1 over the first
+     * half of its duration (centred on the cut point) and 1 -> 0 over the second half,
+     * so the frame is fully black for an instant exactly at the boundary and fully
+     * transparent [durationMs]/2 on either side of it -- a linear ramp, not eased,
+     * kept deliberately simple for a first version of this feature.
+     */
+    private fun transitionOverlayTextures(project: ProjectState): List<TextureOverlay> =
+        project.effectiveTransitions().map { transition ->
+            val clip = project.clips.first { it.id == transition.afterClipId }
+            val boundaryMs = project.clipStartOffsetMs(transition.afterClipId) + clip.durationMs
+            val halfWindowMs = (transition.durationMs / 2).coerceAtLeast(1L)
+            object : BitmapOverlay() {
+                override fun getBitmap(presentationTimeUs: Long): Bitmap = transitionBlackBitmap
+                override fun getOverlaySettings(presentationTimeUs: Long): OverlaySettings {
+                    val positionMs = presentationTimeUs / 1000L
+                    val distanceMs = abs(positionMs - boundaryMs)
+                    val alpha = if (distanceMs >= halfWindowMs) 0f else 1f - (distanceMs.toFloat() / halfWindowMs)
+                    return StaticOverlaySettings.Builder()
+                        .setBackgroundFrameAnchor(0f, 0f)
+                        .setAlphaScale(alpha)
+                        .build()
+                }
+            }
+        }
 
     /**
      * Photos and videos share one sequence so the user's ordering is

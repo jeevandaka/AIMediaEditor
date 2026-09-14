@@ -95,7 +95,12 @@ fun TimelineStrip(
     modifier: Modifier = Modifier,
     pixelsPerSecond: Dp = BASE_PIXELS_PER_SECOND,
     scrollState: ScrollState = rememberScrollState(),
-    playheadMs: Long? = null
+    playheadMs: Long? = null,
+    // Clip ids that currently have an active (effective) transition after them --
+    // drives which toggle between two clips renders as "on." A plain Set, not the raw
+    // ClipTransition list, since this composable only needs membership, not duration.
+    transitionsAfterClipIds: Set<String> = emptySet(),
+    onToggleTransition: (afterClipId: String) -> Unit = {}
 ) {
     var order by remember(clips.map { it.id }) { mutableStateOf(clips.map { it.id }) }
     var bounds by remember { mutableStateOf(mapOf<String, ClosedRange<Float>>()) }
@@ -112,8 +117,8 @@ fun TimelineStrip(
             .height(96.dp)
     ) {
         Row(modifier = Modifier.padding(vertical = 8.dp, horizontal = 4.dp)) {
-            for (clipId in order) {
-                val clip = clips.firstOrNull { it.id == clipId } ?: continue
+            order.forEachIndexed { index, clipId ->
+                val clip = clips.firstOrNull { it.id == clipId } ?: return@forEachIndexed
                 val isDragging = clipId == draggingId
 
                 Box(
@@ -167,12 +172,49 @@ fun TimelineStrip(
                         Text("\u2261", color = Color.White, style = MaterialTheme.typography.titleMedium)
                     }
                 }
+
+                // A small tap target between two adjacent clips, not a drag -- unlike
+                // the reorder grip and trim handles above, this is tap-only, so it adds
+                // no new gesture surface to an area that already produced two rounds of
+                // real gesture-conflict bugs (audio drag, video trim). Only rendered
+                // between clips (never after the last one -- there's nothing to
+                // transition into).
+                if (index < order.lastIndex) {
+                    TransitionToggle(
+                        isActive = clipId in transitionsAfterClipIds,
+                        onClick = { onToggleTransition(clipId) }
+                    )
+                }
             }
         }
 
         if (playheadMs != null) {
             Playhead(playheadMs, pixelsPerSecond)
         }
+    }
+}
+
+/**
+ * The tappable divider between two adjacent clips that toggles a fade-to-black
+ * transition on/off at that boundary (UX spec section 25, Tier 1). Narrow (18.dp) on
+ * purpose -- wide enough to tap reliably, narrow enough not to visually compete with
+ * the clips themselves for space on an already-dense timeline row.
+ */
+@Composable
+private fun TransitionToggle(isActive: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxHeight()
+            .width(18.dp)
+            .background(if (isActive) Color(0xFFE94560) else Color.DarkGray.copy(alpha = 0.3f))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            if (isActive) "◐" else "·",
+            color = Color.White,
+            style = MaterialTheme.typography.titleMedium
+        )
     }
 }
 
