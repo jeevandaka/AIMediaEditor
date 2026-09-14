@@ -53,4 +53,10 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
 
     debugImplementation(libs.androidx.ui.tooling)
+
+    // Local JVM unit tests (app/src/test) -- editor/model/ is deliberately Android-free
+    // (see ProjectState.kt's own doc comment) specifically so it's unit-testable without
+    // an emulator; this dependency is what actually lets that promise be exercised via
+    // `./gradlew test`, which nothing in the build did before this round.
+    testImplementation(libs.junit)
 }

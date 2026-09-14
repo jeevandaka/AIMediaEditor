@@ -4,7 +4,8 @@ Status: **manual editor + real Media3 export pipeline (device-verified) +
 project persistence/autosave (JVM-verified) + several real-device bug fixes
 + a draggable audio timeline + a timeline playhead and zoom + audio
 snapping + on-canvas text positioning + real audio waveforms + a
-reorderable multi-effect stack + fade-to-black transitions (below).** The
+reorderable multi-effect stack + fade-to-black transitions + a checked-in
+JUnit test suite for `editor/model/` (below).** The
 AI layer (natural-language prompts, media search/indexing) is not built yet
 — everything below is the conventional editor spec section 9 requires to
 exist on its own, plus the non-destructive EDL/command core spec section 21
@@ -411,6 +412,73 @@ up from black — a real, named transition type in its own right (not a
 placeholder for cross-dissolve), just not the one most people picture
 first when they hear "transition."
 
+## Hardening pass (this round)
+
+Seven consecutive rounds shipped new, unverified Compose gesture and
+Media3 surface area with no device access to actually confirm any of it.
+Asked how to proceed with the one remaining Tier-1 item (drag-and-drop
+media placement, which turned out to need a new in-editor media tray
+built from scratch plus another cross-screen drag gesture — the same risk
+category that caused two real bugs earlier this session), the call was to
+pause new features and spend this round hardening what already exists
+instead. Two things came out of that:
+
+**1. A real, checked-in, `./gradlew test`-runnable suite.** Every prior
+round's model verification was a standalone Kotlin/JVM script living in a
+scratchpad directory outside the repo — useful for this sandbox (no
+Android SDK, no network to Google's Maven), but nothing a contributor or
+CI would ever actually run. `app/build.gradle.kts` now depends on JUnit4,
+and `app/src/test/java/com/aimediaeditor/app/editor/model/` has two real
+test classes:
+- `ProjectStateSerializationTest` — the round-trip/forward-compat/
+  backward-compat checks every `@Serializable` change this session has
+  been verified with, now importing the REAL `ProjectState`/`VideoClip`/
+  `ProjectRecord` etc. directly (not a hand-copied mirror), so these tests
+  can never silently drift from what actually ships the way a
+  standalone script's copy could.
+- `ProjectSanitizerTest` — new coverage for `ProjectSanitizer`, whose own
+  doc comment has said since round 1 that its boundary arithmetic was
+  "hand-traced... verified against a throwaway Python port," never
+  actually executed as Kotlin. These cases (trim clamping, split
+  no-ops, effect-stack toggle/reorder including the legacy-filter
+  migration, transition toggle/duration-clamp, `effectiveTransitions()`
+  resolution) were first proven to pass for real against a faithful
+  mirror of the exact same logic in the standalone JVM harness (21
+  checks, all passing, including a dedicated regression test for the
+  split+transition bug fixed a few commits ago) before being ported here
+  — so there's real confidence behind them even though, like everything
+  Android-touching in this project, `./gradlew test` itself couldn't be
+  run in this sandbox (no Android SDK to resolve AGP against). A real
+  device/CI build running `./gradlew test` gets this suite for free.
+
+**2. An adversarial re-read of this session's riskiest untested code,**
+specifically the two newest, never-used-before-this-session Android APIs:
+`CompositionBuilder`'s `BitmapOverlay`-based transition rendering and
+`AudioWaveformLoader`'s `MediaCodec` decode loop. This caught one real
+gap: the waveform decode loop had no upper bound at all — a malformed
+file or an unusual codec/stream combination that never signals
+end-of-stream would have spun it forever. Fixed with a plain wall-clock
+elapsed-time check inside the loop (20-second cap, `DECODE_TIMEOUT_MS`)
+rather than `kotlinx.coroutines.withTimeoutOrNull` — the loop's body is
+pure blocking Android-framework calls with no suspension points, so
+cooperative coroutine cancellation would have had nothing to actually
+interrupt; a direct elapsed-time check needs no cancellation-cooperation
+reasoning to be confident it's correct. The transition-overlay code held
+up on re-read with no new correctness bug found, though the pass
+surfaced one minor, now-documented caveat (a one-time bitmap allocation
+that could land on the main thread during preview — see "Known
+limitations").
+
+Also caught in passing while auditing this round's new symbols for the
+same mistake: `EditorScreen.kt` was missing its imports for
+`effectiveEffects` and `clipStartOffsetMs` (`effectiveEffects` landed
+without its import in the multi-effect-stack commit two rounds ago —
+already fixed in the transitions commit that followed it, but worth
+naming here as a concrete example of exactly the kind of bug this
+hardening pass is meant to catch: brace/paren balance alone, this
+project's only prior sanity check with no compiler available, cannot
+catch a missing import).
+
 ## What's verified vs. not, this round
 
 The persistence work above is new, plain-Kotlin logic with no Media3/codec
@@ -641,6 +709,9 @@ AIMediaEditor/
             │                 ProjectHistory, CropMath, TimelinePositions}.kt
             └── editor/export/{CompositionBuilder, ExportWorker,
                                 PendingExportHolder}.kt
+    └── src/test/java/com/aimediaeditor/app/editor/model/
+        ├── ProjectStateSerializationTest.kt
+        └── ProjectSanitizerTest.kt
 ```
 
 Single Gradle module. Split into the `core-*`/`feature-*` layout from spec
@@ -670,6 +741,10 @@ module boundary earns its build-time cost.
    versions differ slightly.
 3. Run on a device or emulator on Android 8.0 (API 26) or newer with some
    photos/videos present (or `adb push file.jpg /sdcard/Pictures/`).
+4. `./gradlew test` runs the JVM unit test suite under `app/src/test`
+   (`editor/model/`'s serialization and `ProjectSanitizer` coverage — see
+   "Hardening pass" above) — no device or emulator needed for this one,
+   just the Android SDK for Gradle to resolve AGP against.
 
 This sandbox has no Android SDK and no network path to `dl.google.com`
 (Google's SDK component repository is not reachable from here, confirmed
@@ -740,13 +815,16 @@ be parsed into once the prompt UI is built. When that's wired up:
 - Audio waveforms (`AudioWaveformLoader`) have the same no-cache-beyond-
   `remember` limitation as the video filmstrip above, plus its own new
   ones: the full source file is decoded synchronously on a background
-  thread with no timeout and no cap on file length, so a very long audio
-  source could take a visible moment (or, unverified, could be genuinely
-  slow) before its waveform appears; there's no cache shared across
-  reopening the same project either. The waveform is a peak-per-bucket
-  envelope, not a true min/max or RMS rendering, so very short transient
-  spikes in a bucket's time range can look more prominent than the
-  track's overall loudness in that region would suggest.
+  thread, so a very long audio source could take a visible moment before
+  its waveform appears; there's no cache shared across reopening the same
+  project either. The decode loop now gives up and returns null past a
+  20-second wall-clock cap (added during this round's hardening pass,
+  see below) rather than running unbounded, but a file that's merely slow
+  rather than hung will still show no waveform if it doesn't finish
+  within that window. The waveform is a peak-per-bucket envelope, not a
+  true min/max or RMS rendering, so very short transient spikes in a
+  bucket's time range can look more prominent than the track's overall
+  loudness in that region would suggest.
 - The multi-effect stack has no per-effect intensity control (each filter is
   all-or-nothing, same as before) and no on-canvas indication of WHICH
   filters are applied besides the chip row's selected state and the order
@@ -765,13 +843,28 @@ be parsed into once the prompt UI is built. When that's wired up:
   clips are long, in the sense that nothing currently prevents setting a
   transition duration longer than a very short adjacent clip's own
   length, which would make the dip-to-black window extend into or past
-  that clip's trim boundaries — not yet guarded against.
+  that clip's trim boundaries — not yet guarded against. Two transitions
+  close enough together that their fade windows overlap (e.g. a very
+  short clip with a transition on both sides) will show both overlays'
+  alpha stacked rather than anything smarter, since each transition is
+  computed independently with no awareness of the others. Also noted
+  during this round's hardening pass: `transitionBlackBitmap`'s one-time
+  1920×1080 allocation happens lazily on whichever thread first triggers
+  a transition render, which could be the main thread if that's a preview
+  (as opposed to export, which runs on a background `WorkManager` thread)
+  — a small (likely sub-frame, unmeasured) one-time hitch, not moved to a
+  background pre-warm since that would be a bigger change than this
+  round's hardening scope.
 - Single module, no DI framework.
-- No automated test suite wired into the Gradle build itself
-  (`app/src/test`) despite `editor/model/` and `data/project/` being pure,
-  portable Kotlin that's well suited to one — this round's verification of
-  the persistence model (see "What's verified vs. not") was a standalone
-  script, not a checked-in, CI-runnable test.
+- `app/src/test` now exists (see "Hardening pass" below) but only covers
+  `editor/model/` — the two files that are pure, portable Kotlin, the same
+  scope every standalone JVM verification script this project has used all
+  along was already limited to. Everything Android-touching (`data/media/`,
+  `data/project/`, all of `ui/`, `editor/export/`) still has zero automated
+  coverage; only `./gradlew test` (JVM unit tests) is wired up, not
+  `./gradlew connectedAndroidTest` (instrumented, needs a device/emulator)
+  — this sandbox can run neither, so even the new suite is unexecuted here,
+  same caveat as everything else Android-specific in this project.
 - Not verified: performance on low-RAM devices, 4K sources, thermal
   throttling during export, HDR tone-mapping.
 
