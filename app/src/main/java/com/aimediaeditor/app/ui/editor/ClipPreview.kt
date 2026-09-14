@@ -50,6 +50,7 @@ import com.aimediaeditor.app.editor.model.FocalPoint
 import com.aimediaeditor.app.editor.model.TextOverlay
 import com.aimediaeditor.app.editor.model.VideoClip
 import com.aimediaeditor.app.editor.model.computeCropWindow
+import com.aimediaeditor.app.editor.model.effectiveEffects
 
 /**
  * Fixed height for the single-clip preview, regardless of the source's own aspect
@@ -139,8 +140,9 @@ fun ClipPreview(
                     // Live filter preview for photos -- video's live preview goes through
                     // ExoPlayer.setVideoEffects() in EditorScreen instead, since a GL
                     // video effect can't be applied to a Compose Image. Both read the
-                    // same FilterType, they just render it through different pipelines.
-                    colorFilter = colorMatrixFor(clip.filter)?.let { ColorFilter.colorMatrix(it) }
+                    // same clip.effectiveEffects() stack, they just render it through
+                    // different pipelines.
+                    colorFilter = stackedColorMatrixFor(clip.effectiveEffects())?.let { ColorFilter.colorMatrix(it) }
                 )
             }
 
@@ -247,6 +249,53 @@ private fun contrastMatrix(contrast: Float, extraBrightness: Float): ColorMatrix
             0f, 0f, 0f, 1f, 0f
         )
     )
+}
+
+/**
+ * Folds a clip's effect STACK (UX spec section 20, Tier 1) into one combined matrix,
+ * applying each filter's own [colorMatrixFor] in list order -- filters[0] first,
+ * filters[1] applied to its output, and so on, matching the order
+ * [com.aimediaeditor.app.editor.export.CompositionBuilder.stackedFilterEffects]
+ * concatenates the same stack's real Media3 effects in for export. Returns null only
+ * when the stack is empty (nothing to apply), same "no colorFilter at all" contract
+ * [colorMatrixFor] already had for a single NONE filter.
+ */
+private fun stackedColorMatrixFor(filters: List<FilterType>): ColorMatrix? =
+    filters.fold<FilterType, ColorMatrix?>(null) { combined, filter ->
+        val next = colorMatrixFor(filter) ?: return@fold combined
+        if (combined == null) next else concatColorMatrices(applyFirst = combined, applySecond = next)
+    }
+
+/**
+ * Composes two 4x5 color matrices (Compose's [ColorMatrix] layout: row-major, 5 floats
+ * per row -- columns 0..3 are the R/G/B/A multiplicative coefficients, column 4 is the
+ * additive offset) into one matrix that applies [applyFirst]'s transform to a pixel,
+ * then [applySecond]'s, to the SAME pixel -- the standard affine-matrix composition
+ * rule (out = second * (first * in) = (second * first) * in), hand-written rather than
+ * reached for a built-in combinator method since Compose's ColorMatrix exposes none
+ * whose exact name could be confirmed without the ability to compile against it here
+ * (same caution CompositionBuilder documents for HslAdjustment). This is the same math
+ * android.graphics.ColorMatrix.postConcat() performs on the platform class.
+ */
+private fun concatColorMatrices(applyFirst: ColorMatrix, applySecond: ColorMatrix): ColorMatrix {
+    val a = applyFirst.values
+    val b = applySecond.values
+    val result = FloatArray(20)
+    for (row in 0 until 4) {
+        for (col in 0 until 4) {
+            var sum = 0f
+            for (k in 0 until 4) {
+                sum += b[row * 5 + k] * a[k * 5 + col]
+            }
+            result[row * 5 + col] = sum
+        }
+        var offset = b[row * 5 + 4]
+        for (k in 0 until 4) {
+            offset += b[row * 5 + k] * a[k * 5 + 4]
+        }
+        result[row * 5 + 4] = offset
+    }
+    return ColorMatrix(result)
 }
 
 @Composable

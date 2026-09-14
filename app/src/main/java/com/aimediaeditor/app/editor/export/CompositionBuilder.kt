@@ -188,7 +188,7 @@ object CompositionBuilder {
      */
     private fun effectsFor(clip: VideoClip, targetAspectRatio: Float): Effects {
         val videoEffects = buildList<Effect> {
-            addAll(filterEffects(clip.filter))
+            addAll(stackedFilterEffects(clip.effectiveEffects()))
             cropEffectFor(clip, targetAspectRatio)?.let { add(it) }
         }
         val audioProcessors = buildList<AudioProcessor> {
@@ -200,11 +200,10 @@ object CompositionBuilder {
     }
 
     /**
-     * Not private: [com.aimediaeditor.app.ui.editor.ClipPreview] reuses this exact
-     * mapping to live-preview a filter on the selected clip via
-     * `ExoPlayer.setVideoEffects()`. Reusing it (instead of a second hand-written
-     * mapping in the UI layer) is deliberate -- two implementations of "what a
-     * filter looks like" is exactly the shape of bug that produced the
+     * Not private: EditorScreen's live single-clip video preview reuses this exact
+     * mapping via `ExoPlayer.setVideoEffects()`. Reusing it (instead of a second
+     * hand-written mapping in the UI layer) is deliberate -- two implementations of
+     * "what a filter looks like" is exactly the shape of bug that produced the
      * aspect-ratio/preview-vs-export divergence fixed in an earlier round.
      */
     internal fun filterEffects(filter: FilterType): List<Effect> = when (filter) {
@@ -214,6 +213,17 @@ object CompositionBuilder {
         FilterType.CINEMATIC -> listOf(Contrast(0.25f))
         FilterType.VIVID -> listOf(Contrast(0.35f), Brightness(0.05f))
     }
+
+    /**
+     * A clip's full effect STACK (UX spec section 20, Tier 1), not just one filter --
+     * concatenates each filter's own [filterEffects] in order, since Media3 already
+     * applies a `List<Effect>` sequentially; stacking multiple named filters needs no
+     * combination math beyond concatenation, the same mechanism VIVID already uses to
+     * combine Contrast+Brightness into a single filter's own effect list. Also not
+     * private for the same live-preview-reuse reason as [filterEffects] above.
+     */
+    internal fun stackedFilterEffects(filters: List<FilterType>): List<Effect> =
+        filters.flatMap { filterEffects(it) }
 
     /**
      * The project's aspect ratio, applied for real -- and applied around

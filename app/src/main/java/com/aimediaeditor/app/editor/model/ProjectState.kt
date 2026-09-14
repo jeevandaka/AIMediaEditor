@@ -52,7 +52,19 @@ data class VideoClip(
     val trimEndMs: Long,
     val speed: Float = 1f,
     val volume: Float = 1f,
+    // Legacy single-filter field, kept ONLY so a project saved before the effect stack
+    // existed still decodes with its filter intact -- see effectiveEffects() below.
+    // Nothing writes a non-NONE value here anymore; ProjectSanitizer clears it back to
+    // NONE the moment a clip's effects are touched, so there's exactly one live source
+    // of truth (effects) once a clip has been edited under the new model.
     val filter: FilterType = FilterType.NONE,
+    // Added this round (UX spec section 20, "reorderable multi-effect stack," Tier 1):
+    // a clip can now carry several filters applied in order, not just one. Defaults to
+    // empty so every VideoClip constructed before this round, and every already-saved
+    // project (which has `filter` but no `effects` key at all), decodes unchanged --
+    // effectiveEffects() below is what actually resolves "what applies to this clip,"
+    // never this field read directly.
+    val effects: List<FilterType> = emptyList(),
     val focalPoint: FocalPoint? = null, // Smart Reframe target, spec section 12 -- also doubles as the manual crop/reframe anchor in the Phase 2 editor UI
     // Added in Phase 2, all defaulted so nothing that already constructs a VideoClip breaks.
     // "VideoClip" keeps the spec's section-17 name even though it can hold a still image
@@ -63,6 +75,18 @@ data class VideoClip(
 ) {
     val durationMs: Long get() = ((trimEndMs - trimStartMs) / speed).toLong()
 }
+
+/**
+ * The single place that decides "which filters actually apply to this clip, in what
+ * order" -- so CompositionBuilder (export), the live single-clip preview, and the
+ * effect-stack UI can never disagree. A clip saved under the new model (effects
+ * non-empty) uses that list as-is; a clip saved under the OLD single-filter model
+ * (effects empty, legacy filter non-NONE) is read as a one-item stack, so nothing
+ * about an already-edited project's look changes just from opening it after this
+ * update. A brand-new, never-filtered clip resolves to an empty stack either way.
+ */
+fun VideoClip.effectiveEffects(): List<FilterType> =
+    effects.ifEmpty { if (filter != FilterType.NONE) listOf(filter) else emptyList() }
 
 /**
  * Longest a single still image may be shown for. A photo has no intrinsic

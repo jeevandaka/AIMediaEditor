@@ -15,7 +15,21 @@ sealed interface EditCommand {
     data class ReorderClips(val orderedClipIds: List<String>) : EditCommand
     data class DeleteClip(val clipId: String) : EditCommand
     data class SetAspectRatio(val ratio: AspectRatio) : EditCommand
-    data class ApplyFilter(val filter: FilterType, val clipId: String?) : EditCommand // null = whole project
+    // Replaced this round's single-select ApplyFilter(filter, clipId): a clip now
+    // carries a reorderable STACK of filters (UX spec section 20, Tier 1), not one.
+    // Toggle adds the filter to the clip's stack if absent, removes it if present --
+    // no separate "apply"/"remove" pair needed since a stack's effects are inherently
+    // add/remove, not overwrite. (The old command's null-clipId "apply to whole
+    // project" case had no caller anywhere in the app and isn't carried forward --
+    // a multi-select stack applied identically across every clip in one command has
+    // murkier semantics, e.g. what "toggle" means when clips disagree, so this stays
+    // per-clip only until something actually needs the project-wide case.)
+    data class ToggleEffect(val clipId: String, val filter: FilterType) : EditCommand
+    // Changes the stack's order without changing its membership -- ProjectSanitizer
+    // drops any entry that isn't already applied rather than trusting this list as a
+    // full replacement, same "never trust the caller's numbers" contract every other
+    // command in this file follows.
+    data class ReorderEffects(val clipId: String, val orderedFilters: List<FilterType>) : EditCommand
     data class SmartReframe(val clipId: String, val focalPoint: FocalPoint) : EditCommand
     data class AddText(val text: String, val startMs: Long, val endMs: Long, val yPositionFraction: Float) : EditCommand
     data class AddAudio(val sourceUri: String, val startMs: Long, val volume: Float, val sourceDurationMs: Long = 0L) : EditCommand

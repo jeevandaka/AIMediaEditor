@@ -3,7 +3,8 @@
 Status: **manual editor + real Media3 export pipeline (device-verified) +
 project persistence/autosave (JVM-verified) + several real-device bug fixes
 + a draggable audio timeline + a timeline playhead and zoom + audio
-snapping + on-canvas text positioning + real audio waveforms (below).** The
+snapping + on-canvas text positioning + real audio waveforms + a
+reorderable multi-effect stack (below).** The
 AI layer (natural-language prompts, media search/indexing) is not built yet
 — everything below is the conventional editor spec section 9 requires to
 exist on its own, plus the non-destructive EDL/command core spec section 21
@@ -31,12 +32,11 @@ README.
 **Built against Tier 1 so far:** a visible timeline playhead and pinch-free
 zoom (+/- buttons), audio drag/trim snapping to clip edges, on-canvas
 direct manipulation for text position (drag the overlay on the preview
-itself), and real per-file audio waveforms on the audio lane — all covered
-under "What's actually here" below. Still missing from Tier 1: true
-drag-and-drop media placement (media is added by selecting then tapping
-"Add to Project," not dragged onto the timeline), transitions (none
-exist), and a real multi-effect stack (one filter per clip, not a
-reorderable list of effects).
+itself), real per-file audio waveforms on the audio lane, and a
+reorderable multi-effect stack per clip — all covered under "What's
+actually here" below. Still missing from Tier 1: true drag-and-drop media
+placement (media is added by selecting then tapping "Add to Project," not
+dragged onto the timeline), and transitions (none exist).
 
 ## Bug fixes (reported from a real device)
 
@@ -317,6 +317,59 @@ limitations"), the drawn bar count is simply a prefix of the full-source
 waveform sized to the currently played fraction, not a re-decode of a
 different range on every trim drag.
 
+**10. Reorderable multi-effect stack (UX spec section 20, Tier 1).** A clip
+could previously carry exactly one filter, chosen from a single-select chip
+row (`FilterChip(selected = filter == clip.filter, ...)`) — applying a
+second filter replaced the first rather than adding to it. `VideoClip`
+gains `effects: List<FilterType> = emptyList()`, and `ApplyFilter` is
+replaced by two commands: `ToggleEffect(clipId, filter)` (adds the filter
+to the clip's stack if absent, removes it if present) and
+`ReorderEffects(clipId, orderedFilters)` (changes the stack's order without
+changing membership — `ProjectSanitizer` drops any filter in the requested
+order that isn't actually applied, the same "never trust the caller's
+numbers" contract every other command follows). `VideoClip.filter`, the
+old single-choice field, stays in the model purely for backward
+compatibility with already-saved projects and is never written to again —
+`ProjectSanitizer` clears it to `NONE` the moment a clip's effects are
+touched, so there's exactly one live source of truth once a clip has been
+edited under the new model. A new `VideoClip.effectiveEffects()` extension
+is what everything downstream actually reads: for a clip already migrated
+to the new model it's just `effects`; for a clip untouched since before
+this round (`effects` empty, legacy `filter` non-`NONE`) it resolves to a
+one-item list built from that old value, so opening an already-saved,
+already-filtered project doesn't lose or change its look.
+
+Both rendering paths that read a clip's filter were updated to read the
+whole stack, not one value, since (per this README's repeated lesson from
+the aspect-ratio bug) there must stay exactly one place that decides what
+a clip's filters look like, reused everywhere: `CompositionBuilder` gains
+`stackedFilterEffects(filters)`, which concatenates each filter's own
+`Effect` list in order — Media3 already applies a `List<Effect>`
+sequentially, so stacking named filters needed no new combination logic
+beyond concatenation, the exact mechanism `VIVID` already used internally
+to combine `Contrast`+`Brightness` into one filter's own effect list. This
+same function now backs both export and the live single-clip video
+preview's `ExoPlayer.setVideoEffects()` call. The photo preview path (a
+static Coil `Image`, which can't run Media3 GL effects) needed real new
+math: `ClipPreview` gains `stackedColorMatrixFor`/`concatColorMatrices`,
+which folds each filter's existing 4×5 `ColorMatrix` into one combined
+matrix using the standard affine-composition rule (apply the first
+filter's transform, then the second's, to the same pixel — the same math
+`android.graphics.ColorMatrix.postConcat()` performs on the platform
+class, hand-written here since Compose's `ColorMatrix` exposes no
+combinator method whose exact name could be confirmed without the ability
+to compile against it, the same caution `CompositionBuilder` already
+documents for `HslAdjustment`).
+
+The UI (`ClipStyleRow`) changes from single-select to multi-select: tapping
+a filter chip toggles it in or out of the stack rather than replacing the
+whole selection, and — deliberately avoiding a new drag gesture, per the
+same reasoning that held back pinch-to-zoom — a second row of up/down
+buttons appears once more than one filter is applied, to reorder the
+stack without adding another touch surface to an area that's already
+produced two rounds of real gesture-conflict bugs (audio drag, video
+trim).
+
 ## What's verified vs. not, this round
 
 The persistence work above is new, plain-Kotlin logic with no Media3/codec
@@ -423,6 +476,39 @@ Needs an on-device check before it's trusted: does a real audio file
 hanging or OOM-ing, does the drawn shape actually resemble the audio's
 loud/quiet structure, and does trimming a track's length live-update
 the visible bar count correctly.
+
+The multi-effect stack has both a serialization surface and new
+plain-Kotlin arithmetic, and each was verified the way this project
+verifies what it actually can from this sandbox. `VideoClip.effects` was
+round-tripped in the same standalone JVM project as every other
+`@Serializable` change this session, including a project saved *before*
+`effects` existed (only the legacy `filter` key present, no `effects` key
+at all) — confirmed it decodes with `effects` defaulting to `emptyList()`
+and the legacy `filter` value left untouched, rather than crashing or
+losing data. The new `concatColorMatrices` math (combining two clips'
+worth of filters into one 4×5 matrix for the photo preview) was hand-
+traced against a plain-Python re-implementation of the same formula,
+checked against sequential application of two and three stacked filters
+to a sample pixel (apply filter A, then filter B, to a pixel vs. the
+single combined matrix applied once) — they matched exactly in both
+cases, plus the identity-matrix edge cases (`concat(identity, X) == X`
+and `concat(X, identity) == X`). That's a genuine, reproducible check of
+the arithmetic itself, the same caution level this README already applies
+to `ProjectSanitizer`'s clamp math.
+
+What that does NOT cover: whether `ExoPlayer.setVideoEffects()` actually
+applies a multi-item `List<Effect>` the way `stackedFilterEffects`
+assumes (concatenation of independently-correct per-filter lists is a
+reasonable expectation of Media3's own effect pipeline, not a novel
+claim, but still unconfirmed against the pinned 1.11.0 artifact — the
+same honest-risk category `EditorScreen`'s live-preview `LaunchedEffect`
+already flags for the single-filter case this replaces), and the new
+`ClipStyleRow` UI (multi-select chip toggling, the up/down reorder
+buttons) is untested Compose interaction code, same as every UI change
+this session. Needs an on-device check: apply two or more filters to one
+clip, confirm both the single-clip preview (video AND photo) and the
+final export show all of them stacked in the chosen order, then reorder
+them and confirm the visible result actually changes to match.
 
 ## What's not here yet
 
@@ -583,6 +669,13 @@ be parsed into once the prompt UI is built. When that's wired up:
   envelope, not a true min/max or RMS rendering, so very short transient
   spikes in a bucket's time range can look more prominent than the
   track's overall loudness in that region would suggest.
+- The multi-effect stack has no per-effect intensity control (each filter is
+  all-or-nothing, same as before) and no on-canvas indication of WHICH
+  filters are applied besides the chip row's selected state and the order
+  row's numbered list — no live thumbnail-per-filter or similar preview.
+  Reordering is up/down buttons, not drag (deliberate, see "What's
+  actually here" item 10), which is more taps for a stack of more than a
+  couple of filters.
 - Single module, no DI framework.
 - No automated test suite wired into the Gradle build itself
   (`app/src/test`) despite `editor/model/` and `data/project/` being pure,
@@ -620,7 +713,12 @@ Manual, on a real device (no SDK in this sandbox to run instrumented tests):
     not showing the first photo's dragged position.
 9c. Select a filter on a photo, then on a video → confirm the single-clip
     preview visibly changes for both (photo: immediately; video: check it
-    doesn't restart playback when the filter is applied).
+    doesn't restart playback when the filter is applied). Tap a second,
+    different filter chip → confirm it ADDS to the look (both filters'
+    effects visible together) rather than replacing the first, and that
+    the chip row now shows both chips selected, not just the most recent
+    one. Tap either selected chip again → confirm it removes just that
+    filter, leaving the other applied.
 9d. Select a tall portrait photo or video → confirm the preview stays a
     fixed height, doesn't cover the screen, and the page still scrolls to
     reach the editing tools below it.
@@ -674,6 +772,18 @@ Manual, on a real device (no SDK in this sandbox to run instrumented tests):
     than staying the same or showing stale bars. Try a short clip and a
     long (multi-minute) file → confirm neither hangs, crashes, or leaves
     the app unresponsive while decoding.
+9n. Select a video clip, apply 2-3 filters in a row → confirm the "Order"
+    row appears below the chip row, listing them numbered in the order
+    applied. Tap an up/down button on one → confirm its position in the
+    list changes AND the live preview's look visibly changes to match
+    (a Cinematic-then-Vivid look should look different from Vivid-then-
+    Cinematic once reordered). Untoggle one filter chip → confirm it
+    disappears from both the chip row's selection and the Order row, and
+    the Order row disappears entirely once only one (or zero) filters
+    remain applied. Undo/Redo → confirm both the effect set and its order
+    reverse/reapply correctly. Export → confirm the exported video shows
+    all applied filters stacked in the same order shown in the editor, for
+    both a video clip and a photo.
 10. Create a project, make an edit, background the app (Home button) without
     exporting, then kill the app from Recents → relaunch → open it from
     Home's "Projects" row or the Projects screen → confirm the edit is still

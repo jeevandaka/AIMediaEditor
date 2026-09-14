@@ -135,9 +135,10 @@ fun EditorScreen(
     // Live filter preview for the selected video clip. Separate from the effect
     // above on purpose: it must NOT re-trigger setMediaItem/prepare (that would
     // restart playback from 0 every time a filter chip is tapped) -- setVideoEffects
-    // can be called on its own at any time. Reuses CompositionBuilder.filterEffects
-    // (the exact function export uses) rather than a second hand-written mapping, so
-    // this preview can't drift from what actually gets exported.
+    // can be called on its own at any time. Reuses CompositionBuilder.stackedFilterEffects
+    // (the exact function export uses, for the clip's full effect stack, not just one
+    // filter) rather than a second hand-written mapping, so this preview can't drift
+    // from what actually gets exported.
     //
     // Honest risk: ExoPlayer.setVideoEffects(List<Effect>) is a real, documented
     // Media3 API for exactly this ("preview an effect live during playback"), but it
@@ -145,10 +146,10 @@ fun EditorScreen(
     // only to Google's Maven repo, which this sandbox has no network path to (same
     // constraint noted throughout this README). If this doesn't compile, that's a
     // signature/availability mismatch on this one call, not a problem with
-    // filterEffects() itself (which export already exercises).
-    LaunchedEffect(selectedClip?.id, selectedClip?.filter, previewMode) {
+    // stackedFilterEffects() itself (which export already exercises).
+    LaunchedEffect(selectedClip?.id, selectedClip?.effects, selectedClip?.filter, previewMode) {
         if (previewMode == PreviewMode.CLIP && selectedClip?.sourceType == MediaType.VIDEO) {
-            exoPlayer.setVideoEffects(CompositionBuilder.filterEffects(selectedClip.filter))
+            exoPlayer.setVideoEffects(CompositionBuilder.stackedFilterEffects(selectedClip.effectiveEffects()))
         }
     }
 
@@ -316,8 +317,11 @@ fun EditorScreen(
 
                 ClipStyleRow(
                     clip = selectedClip,
-                    onFilterSelected = { filter ->
-                        selectedClip?.let { viewModel.onCommand(EditCommand.ApplyFilter(filter, it.id)) }
+                    onFilterToggled = { filter ->
+                        selectedClip?.let { viewModel.onCommand(EditCommand.ToggleEffect(it.id, filter)) }
+                    },
+                    onEffectsReordered = { ordered ->
+                        selectedClip?.let { viewModel.onCommand(EditCommand.ReorderEffects(it.id, ordered)) }
                     },
                     onSpeedSelected = { speed ->
                         selectedClip?.let { viewModel.onCommand(EditCommand.SetSpeed(it.id, speed)) }
@@ -471,15 +475,27 @@ private val VOLUME_PRESETS = listOf(0f to "Mute", 0.5f to "50%", 1f to "100%")
  * Per-clip look and timing. Filters apply to photos and videos alike;
  * speed is video-only and the row says so rather than offering a control
  * that would be silently ignored.
+ *
+ * Filters are a reorderable STACK now (UX spec section 20, Tier 1), not a single
+ * choice -- the chip row is multi-select (tap toggles membership, not "replace the
+ * selection"), and a second row below it lets the order be changed when more than one
+ * is applied. Reordering uses up/down buttons rather than drag: this area already sits
+ * between two rounds' worth of real gesture-conflict bugs (audio drag, video trim), so
+ * adding a new drag surface here was judged not worth the risk this round -- the same
+ * reasoning the README's "Adopting the UX spec" section gives for holding back
+ * pinch-to-zoom. FilterType.NONE is left out of the chip row entirely -- an empty
+ * stack already means "no filter," so there's no separate sentinel chip to tap.
  */
 @Composable
 private fun ClipStyleRow(
     clip: VideoClip?,
-    onFilterSelected: (FilterType) -> Unit,
+    onFilterToggled: (FilterType) -> Unit,
+    onEffectsReordered: (List<FilterType>) -> Unit,
     onSpeedSelected: (Float) -> Unit,
     onVolumeSelected: (Float) -> Unit
 ) {
     if (clip == null) return
+    val appliedEffects = clip.effectiveEffects()
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
@@ -488,12 +504,48 @@ private fun ClipStyleRow(
                 .padding(horizontal = 8.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            FilterType.entries.forEach { filter ->
+            FilterType.entries.filter { it != FilterType.NONE }.forEach { filter ->
                 FilterChip(
-                    selected = filter == clip.filter,
-                    onClick = { onFilterSelected(filter) },
+                    selected = filter in appliedEffects,
+                    onClick = { onFilterToggled(filter) },
                     label = { Text(filter.name.lowercase().replaceFirstChar { it.uppercase() }) }
                 )
+            }
+        }
+        if (appliedEffects.size > 1) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text("Order:", modifier = Modifier.padding(end = 4.dp))
+                appliedEffects.forEachIndexed { index, filter ->
+                    Text(
+                        "${index + 1}. ${filter.name.lowercase().replaceFirstChar { it.uppercase() }}",
+                        modifier = Modifier.padding(end = 2.dp)
+                    )
+                    TextButton(
+                        enabled = index > 0,
+                        onClick = {
+                            val reordered = appliedEffects.toMutableList().apply {
+                                add(index - 1, removeAt(index))
+                            }
+                            onEffectsReordered(reordered)
+                        }
+                    ) { Text("↑") }
+                    TextButton(
+                        enabled = index < appliedEffects.lastIndex,
+                        onClick = {
+                            val reordered = appliedEffects.toMutableList().apply {
+                                add(index + 1, removeAt(index))
+                            }
+                            onEffectsReordered(reordered)
+                        }
+                    ) { Text("↓") }
+                }
             }
         }
         if (clip.sourceType == MediaType.VIDEO) {

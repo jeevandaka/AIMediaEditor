@@ -59,10 +59,24 @@ object ProjectSanitizer {
 
         is EditCommand.SetAspectRatio -> state.copy(aspectRatio = command.ratio)
 
-        is EditCommand.ApplyFilter -> if (command.clipId == null) {
-            state.copy(clips = state.clips.map { it.copy(filter = command.filter) })
-        } else {
-            state.mapClip(command.clipId) { it.copy(filter = command.filter) }
+        is EditCommand.ToggleEffect -> state.mapClip(command.clipId) { clip ->
+            val current = clip.effectiveEffects()
+            val updated = if (command.filter in current) current - command.filter else current + command.filter
+            // Once a clip's effects have been touched under the new model, the legacy
+            // single-filter field is cleared -- effects becomes the only live source of
+            // truth for this clip from here on (see effectiveEffects() in ProjectState).
+            clip.copy(effects = updated, filter = FilterType.NONE)
+        }
+
+        is EditCommand.ReorderEffects -> state.mapClip(command.clipId) { clip ->
+            val current = clip.effectiveEffects()
+            // Only reorder filters that are actually applied -- an entry the caller
+            // listed that isn't currently on the stack is dropped, not added; any
+            // currently-applied filter the caller's list omitted keeps its relative
+            // order, appended after the ones the caller did place.
+            val reordered = command.orderedFilters.filter { it in current } +
+                current.filterNot { it in command.orderedFilters }
+            clip.copy(effects = reordered, filter = FilterType.NONE)
         }
 
         is EditCommand.SmartReframe -> state.mapClip(command.clipId) {
