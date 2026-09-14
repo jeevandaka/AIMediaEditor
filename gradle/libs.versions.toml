@@ -1,13 +1,13 @@
 [versions]
 agp = "9.3.0"
-kotlin = "2.3.20"
+kotlin = "2.1.0"
 # KSP's version string is ALWAYS "<matching-kotlin-version>-<ksp-build>" -- this pairing
-# with kotlin = 2.3.20 above is the single least-confirmable version in this file: get it
+# with kotlin = 2.1.0 above is the single least-confirmable version in this file: get it
 # wrong and the build fails to even sync (unlike a library version merely failing to
 # resolve). No network path to Google's/Gradle Plugin Portal's actual release list from
 # this sandbox to confirm the exact "-1.x.x" suffix; see the README's "Media indexing"
 # section for what to check first if sync fails.
-ksp = "2.3.20-1.0.29"
+ksp = "2.1.0-1.0.29"
 coreKtx = "1.19.0"
 lifecycle = "2.11.0"
 activityCompose = "1.10.1"
