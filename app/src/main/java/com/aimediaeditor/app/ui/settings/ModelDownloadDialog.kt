@@ -1,6 +1,9 @@
 package com.aimediaeditor.app.ui.settings
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.AlertDialog
@@ -15,6 +18,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 
@@ -29,9 +33,15 @@ import androidx.compose.ui.unit.dp
  * download can be retried without re-pasting it -- it is never sent anywhere except
  * huggingface.co, and never touched again once the model file exists. Once
  * [isModelReady] is true, every AI feature in this app runs with no network
- * involvement at all. Originally written inline in `EditorScreen.kt`; extracted here
- * once [com.aimediaeditor.app.ui.search.MediaSearchScreen] needed the exact same flow
- * for AI search -- a genuine second caller, not speculative reuse.
+ * involvement at all -- and with no ongoing cost either: the model itself and
+ * MediaPipe's runtime are both free, so this download is the only "setup" of any
+ * kind, ever. Two buttons open the device's own browser straight to the model's
+ * license page and the token-creation page (real `ACTION_VIEW` intents, not a
+ * WebView -- this app never touches the Hugging Face login flow itself), so the user
+ * doesn't have to go find either page on their own. Originally written inline in
+ * `EditorScreen.kt`; extracted here once [com.aimediaeditor.app.ui.search.MediaSearchScreen]
+ * needed the exact same flow for AI search -- a genuine second caller, not
+ * speculative reuse.
  */
 @Composable
 fun ModelDownloadDialog(
@@ -43,7 +53,23 @@ fun ModelDownloadDialog(
     onDismiss: () -> Unit,
     onDownload: (String) -> Unit
 ) {
+    val context = LocalContext.current
     var token by remember { mutableStateOf(initialToken) }
+
+    fun openUrl(url: String) {
+        // A plain ACTION_VIEW intent, not a WebView -- opens the device's own browser
+        // (where the user's existing Hugging Face login/session, if any, already
+        // applies), so this app never touches the account flow or the token itself
+        // beyond the field below. Every real Android device ships something that
+        // handles a plain https:// ACTION_VIEW, but this degrades to a silent no-op
+        // rather than crashing on the (essentially theoretical) device that doesn't.
+        try {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } catch (e: Exception) {
+            // No app on the device can handle this -- nothing more this dialog can do.
+        }
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("On-device AI model") },
@@ -68,17 +94,32 @@ fun ModelDownloadDialog(
                         Text(
                             "Downloads Google's Gemma model (roughly 500MB-1GB, one time only) " +
                                 "so AI features work fully offline afterward -- no project data or " +
-                                "search query is ever sent anywhere. The model is gated behind a " +
-                                "free Hugging Face account: sign in at huggingface.co, accept the " +
-                                "Gemma license on the model page, then paste an access token below.",
+                                "search query is ever sent anywhere. It's completely free -- no " +
+                                "subscription, no per-use cost -- but the model file itself is " +
+                                "gated behind a free Hugging Face account and Google's Gemma " +
+                                "license, so a one-time sign-up is required before the first use.",
                             style = MaterialTheme.typography.bodySmall
                         )
+                        Row(modifier = Modifier.padding(top = 8.dp)) {
+                            TextButton(onClick = {
+                                openUrl("https://huggingface.co/litert-community/Gemma3-1B-IT")
+                            }) { Text("1. Accept license") }
+                            TextButton(onClick = {
+                                // The bare /settings/tokens page (with its own "+
+                                // Create new token" button) is the confirmed URL --
+                                // a query param to auto-open that button's dialog
+                                // wasn't confirmed against Hugging Face's own docs
+                                // from this sandbox, so this deliberately doesn't
+                                // guess at one.
+                                openUrl("https://huggingface.co/settings/tokens")
+                            }) { Text("2. Get token") }
+                        }
                         OutlinedTextField(
                             value = token,
                             onValueChange = { token = it },
                             modifier = Modifier.padding(top = 8.dp),
                             singleLine = true,
-                            placeholder = { Text("hf_...") },
+                            placeholder = { Text("3. Paste token: hf_...") },
                             visualTransformation = PasswordVisualTransformation()
                         )
                     }

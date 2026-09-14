@@ -1205,17 +1205,22 @@ Both AI features (the editor's AI prompt bar and AI search) share one
 locally-run Gemma model, downloaded once and then used fully offline —
 no per-feature setup, no API key, no billing:
 
-1. Get a Hugging Face access token: sign in (or create a free account) at
-   [huggingface.co](https://huggingface.co/), open
-   [litert-community/Gemma3-1B-IT](https://huggingface.co/litert-community/Gemma3-1B-IT),
-   accept the Gemma license on that page (the repo is gated — this step is
-   required before any file in it can be downloaded), then create an
-   access token under your account settings.
-2. In the app, open a project in the editor and tap "AI model" next to the
+1. In the app, open a project in the editor and tap "AI model" next to the
    AI prompt bar (or, from the search screen, tap "AI Search" before the
    model is downloaded) — either opens the same `ModelDownloadDialog`.
-   Paste the token, tap Download.
-3. The token is stored on-device via `EncryptedSharedPreferences`
+2. Tap "1. Accept license" — opens the device's own browser straight to
+   [litert-community/Gemma3-1B-IT](https://huggingface.co/litert-community/Gemma3-1B-IT)
+   (a real `ACTION_VIEW` intent, not a WebView inside this app). Sign in
+   or create a free Hugging Face account if needed, accept the Gemma
+   license on that page (the repo is gated — required before any file in
+   it can be downloaded).
+3. Tap "2. Get token" — opens the browser to
+   [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens),
+   where "+ Create new token" makes one. Copy it.
+4. Switch back to the app, paste the token into the field, tap Download —
+   confirm the download's progress, then that both AI features become
+   usable once it finishes.
+5. The token is stored on-device via `EncryptedSharedPreferences`
    (`data/settings/ModelAccessTokenStore.kt`) purely so an interrupted
    download can be retried without re-pasting it — it is used ONLY as
    that download request's Authorization header, sent to nowhere but
@@ -1516,9 +1521,14 @@ Manual, on a real device (no SDK in this sandbox to run instrumented tests):
     Projects screen agree on what exists and show a sensible relative time
     ("Just now", "Xm ago", etc.) that updates on revisit.
 13a. In the editor, tap "AI model" next to the AI prompt bar → confirm the
-     `ModelDownloadDialog` opens showing the download explanation and a
-     token field. Paste a real Hugging Face token (see "Setup
-     instructions") and tap Download → confirm a progress indicator shows
+     `ModelDownloadDialog` opens showing the download explanation, a
+     "1. Accept license" button, a "2. Get token" button, and a token
+     field. Tap "1. Accept license" → confirm the device's own browser
+     opens to the Gemma3-1B-IT model page (not an in-app WebView). Back
+     out, tap "2. Get token" → confirm the browser opens to
+     huggingface.co's token settings page. Paste a real Hugging Face
+     token (see "Setup instructions") and tap Download → confirm a
+     progress indicator shows
      (a percentage once the server reports a size, otherwise an
      indeterminate spinner) and, on success, the dialog switches to a
      "Model downloaded and ready" state. Reopen the dialog after closing
