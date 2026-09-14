@@ -1,16 +1,43 @@
 # AI Media Editor — Phase 1–3: media browser, manual editor, real export, persistence
 
 Status: **manual editor + real Media3 export pipeline (device-verified) +
-project persistence/autosave (JVM-verified) + five real-device bug fixes +
-a draggable audio timeline (below).** The AI layer (natural-language
-prompts, media search/indexing) is not built yet — everything below is the
-conventional editor spec section 9 requires to exist on its own, plus the
-non-destructive EDL/command core spec section 21 and the architecture notes
-require the AI layer to sit on top of later. See "What's not here yet" for
-exactly what's missing, and "What's verified vs. not" for which parts of the
-last few rounds have actually been run.
+project persistence/autosave (JVM-verified) + several real-device bug fixes
++ a draggable audio timeline + a timeline playhead and zoom (below).** The
+AI layer (natural-language prompts, media search/indexing) is not built yet
+— everything below is the conventional editor spec section 9 requires to
+exist on its own, plus the non-destructive EDL/command core spec section 21
+and the architecture notes require the AI layer to sit on top of later. See
+"What's not here yet" for exactly what's missing, and "What's verified vs.
+not" for which parts of the last few rounds have actually been run.
 
-## Bug fixes this round (reported from a real device)
+## Adopting the "World-Class Video Editor" UX spec
+
+A second, much larger spec was provided this round: a 48-section
+professional-editor UX document (magnetic timeline, keyframe animation,
+masks/tracking, color wheels/curves, multicam, transcript editing, a
+command palette, chroma key, and more) — DaVinci/Premiere/CapCut-scale, not
+something any single round attempts. The document itself carries its own
+priority list (section 45: Tier 1 "MVP/Essential," Tier 2 "Premium Feel,"
+Tier 3 "Professional"), so that's the priority this project adopts too,
+rather than inventing a separate one. Progress is tracked against Tier 1
+from here on; Tier 2/3 aren't started.
+
+Naming note, since both documents number their own sections 1 onward: from
+here on, "UX spec section N" means this new document; a bare "spec section
+N" still means the original product spec, as everywhere earlier in this
+README.
+
+**This round, from Tier 1:** a visible timeline playhead and pinch-free
+zoom (+/- buttons), covered under "What's actually here" below. Still
+missing from Tier 1: true drag-and-drop media placement (media is added by
+selecting then tapping "Add to Project," not dragged onto the timeline),
+audio waveforms (blocks are still solid colour), snapping (drags are free-
+form, no snap-to-clip-edge/playhead), on-canvas direct manipulation for
+text (position is still 3 dialog presets, not drag-to-move on the preview),
+transitions (none exist), and a real multi-effect stack (one filter per
+clip, not a reorderable list of effects).
+
+## Bug fixes (reported from a real device)
 
 1. **"Add audio" showed no files despite having plenty on the device.**
    `AudioRepository` filtered on `MediaStore.Audio.Media.IS_MUSIC != 0` —
@@ -190,6 +217,34 @@ Opening a project loads it back into a live, editable `ProjectHistory` —
 this is what makes "reopen app → recover draft → continue editing" (spec
 section 22) real rather than aspirational.
 
+**6. Timeline playhead and zoom (UX spec section 12, Tier 1).** The video
+row and audio lane now take a shared `pixelsPerSecond` from `EditorScreen`
+instead of each hardcoding its own fixed scale — a `+`/`−` `ZoomRow` above
+the timeline (50%–300%, in 25% steps) changes it live, and both lanes
+resize together since they read the same value. During "Play Timeline"
+playback, `TimelinePreview` polls the `CompositionPlayer`'s position every
+100ms and reports it up; both lanes draw a red playhead line pinned to that
+timestamp. Both lanes also now share one `ScrollState` (passed down from
+`EditorScreen`) rather than each creating its own — scrolling either one
+moves both, which incidentally fixes the "the two lanes scroll
+independently" limitation earlier rounds had flagged, since keeping the
+playhead visible in both required solving exactly that. The timeline lanes
+(previously hidden while "Play Timeline" was active, visible only in
+"CLIP" editing mode) are now visible in both modes, since the playhead
+needs somewhere to be drawn during playback, and it also better matches
+the UX spec's own mental model (section 2: timeline always visible below
+the preview, not swapped out for a second full-screen mode) than the
+previous toggle did.
+
+Deliberately not built alongside this: pinch-to-zoom. The UX spec asks for
+it (section 41), but a pinch gesture layered over the same timeline area
+that already hosts per-clip trim/reorder and per-track reposition/trim
+drags is exactly the kind of overlapping-gesture risk the last two rounds'
+bug reports (audio drag not working, video trim not working) came from —
+adding a new multi-touch gesture on top of gestures already reported
+broken once felt like the wrong moment to take that risk blind. +/- buttons
+get the same outcome with no gesture-conflict surface at all.
+
 ## What's verified vs. not, this round
 
 The persistence work above is new, plain-Kotlin logic with no Media3/codec
@@ -229,6 +284,20 @@ alone, which is documented as a fallback for sources whose length can't be
 read from the file itself — for a real audio file, unlikely to actually
 truncate playback. The video-side pattern this mirrors is already
 device-verified; the audio-side application of it is not.
+
+The playhead/zoom work has no serialization surface (`zoomFactor` and
+`timelinePositionMs` are both transient UI state, never persisted), so
+there was nothing to round-trip in a standalone project the way the two
+checks above worked. It's plain Compose layout/state plus one Media3 read
+(`CompositionPlayer.currentPosition`, a base `Player` property, not an
+unstable/experimental one) — lower risk than most of this app's Media3
+integration points, but still unverified on a device: specifically whether
+sharing one `ScrollState` across two independent `horizontalScroll`
+containers behaves as expected (a supported, documented pattern, but this
+app's own history this round is "assumed a Compose layout/gesture pattern
+would just work, shipped it, was wrong" three separate times — see "Bug
+fixes" above), and whether the 100ms poll reads as smooth rather than
+visibly stepping.
 
 ## What's not here yet
 
@@ -348,14 +417,17 @@ be parsed into once the prompt UI is built. When that's wired up:
   for a multi-thousand-item library.
 - Text overlay styling is Media3-default only (no size/colour/font control).
 - Volume is flat per clip/track — no fades or automation.
-- The audio timeline lane (`AudioTrackStrip`) scrolls independently of the
-  video clip row above it, not in synced lockstep — both use the same
-  pixels-per-second scale so a given timestamp lines up at the same
-  horizontal offset in either, but scrolling one doesn't move the other.
-  Trimming an audio track's length also only trims from the end, always
-  starting at the source's own beginning — there's no way yet to skip past
-  the start of a song (drag its left edge) the way a video clip's left trim
-  handle already works.
+- Trimming an audio track's length only trims from the end, always starting
+  at the source's own beginning — there's no way yet to skip past the start
+  of a song (drag its left edge) the way a video clip's left trim handle
+  already works. (The video row and audio lane no longer scroll
+  independently — they now share one `ScrollState` — but this trim-only-
+  from-the-end gap is still open.)
+- No pinch-to-zoom, no tap-to-seek on the playhead — zoom is +/- buttons
+  only, and the playhead is display-only during "Play Timeline" playback,
+  not draggable to scrub (both are the UX spec's Tier 1 asks; the
+  README's "Adopting the UX spec" section explains why pinch was held
+  back this round specifically).
 - Crop is reposition-only within 9:16/16:9/1:1/4:5 — no freeform,
   drag-to-resize crop rectangle yet (requested, not yet built).
 - The timeline strip's video filmstrip (`VideoThumbnailLoader`) has no
@@ -424,6 +496,18 @@ Manual, on a real device (no SDK in this sandbox to run instrumented tests):
     label updates live as you drag, then release and confirm the filmstrip
     refreshes to the new trimmed range. Trim a clip much shorter → confirm
     it still shows at least one tile and doesn't crash or go blank.
+9h. Tap the `+`/`−` buttons above the timeline → confirm both the video row
+    and audio lane resize together, staying aligned (a clip's edge and an
+    audio block's edge that lined up before still line up after). Tap `+`
+    to the top of its range and confirm it stops responding/disables rather
+    than continuing past 300%; same for `−` at the bottom.
+9i. Scroll the video row horizontally → confirm the audio lane scrolls with
+    it (and vice versa) — they should no longer be independent.
+9j. With clips on the timeline, tap "Play Timeline" → confirm a red
+    playhead line appears on both lanes and moves smoothly (not visibly
+    stepping) as the project plays, staying at the same horizontal position
+    in both lanes. Tap "Back to Editing" → confirm the playhead disappears
+    (CLIP mode has no single project-wide position to show one at).
 10. Create a project, make an edit, background the app (Home button) without
     exporting, then kill the app from Recents → relaunch → open it from
     Home's "Projects" row or the Projects screen → confirm the edit is still

@@ -1,5 +1,6 @@
 package com.aimediaeditor.app.ui.editor
 
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -37,10 +38,11 @@ private const val MIN_AUDIO_DURATION_MS = 300L
  * A draggable lane for audio tracks, one block per track, positioned by [AudioTrack.startMs]
  * and sized by its effective duration -- rather than the fixed volume/loop-preset-only
  * controls that existed before ("attach it at a specific place" wasn't otherwise possible
- * without deleting and re-adding). Uses the exact same [PIXELS_PER_SECOND] scale as
- * [TimelineStrip]'s video row so a given timestamp lines up at the same horizontal offset
- * in both, even though the two currently scroll independently (see README) rather than in
- * a synced lockstep.
+ * without deleting and re-adding). Takes the same [pixelsPerSecond] scale [TimelineStrip]'s
+ * video row does (both default to the same [BASE_PIXELS_PER_SECOND], and EditorScreen
+ * passes both the same zoomed value) so a given timestamp lines up at the same horizontal
+ * offset in both, even though the two currently scroll independently (see README) rather
+ * than in a synced lockstep.
  *
  * Unlike [TimelineStrip]'s clips, tracks here are NOT laid out back-to-back in a Row --
  * each is absolutely positioned by its own startMs, since two tracks can legitimately
@@ -53,12 +55,15 @@ fun AudioTrackStrip(
     projectDurationMs: Long,
     onSelect: (String) -> Unit,
     onPositionCommitted: (trackId: String, startMs: Long, durationMs: Long) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    pixelsPerSecond: Dp = BASE_PIXELS_PER_SECOND,
+    scrollState: ScrollState = rememberScrollState(),
+    playheadMs: Long? = null
 ) {
     if (audioTracks.isEmpty()) return
 
     val density = LocalDensity.current
-    val pixelsPerMs = with(density) { PIXELS_PER_SECOND.toPx() } / 1000f
+    val pixelsPerMs = with(density) { pixelsPerSecond.toPx() } / 1000f
     val totalWidth: Dp = with(density) {
         (projectDurationMs.coerceAtLeast(1000L) * pixelsPerMs).toDp()
     }
@@ -70,9 +75,12 @@ fun AudioTrackStrip(
     // Putting an explicit width on the SAME box as horizontalScroll (as an earlier version
     // of this file did) collapses that distinction -- the "viewport" and "content" width
     // become the same box, which is what made every drag on it fail to register correctly.
+    // The playhead is a THIRD child of this same outer box (a sibling of the content box,
+    // not inside it) so it scrolls in step with the tracks and stays pinned to the right
+    // timestamp regardless of this lane's own scroll position.
     Box(
         modifier = modifier
-            .horizontalScroll(rememberScrollState())
+            .horizontalScroll(scrollState)
             .height(48.dp)
             .padding(vertical = 4.dp)
     ) {
@@ -87,6 +95,9 @@ fun AudioTrackStrip(
                     onPositionCommitted = onPositionCommitted
                 )
             }
+        }
+        if (playheadMs != null) {
+            Playhead(playheadMs, pixelsPerSecond)
         }
     }
 }

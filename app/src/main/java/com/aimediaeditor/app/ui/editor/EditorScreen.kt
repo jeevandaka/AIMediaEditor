@@ -27,6 +27,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -34,6 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -171,6 +173,20 @@ fun EditorScreen(
     var showAudioDialog by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
     var selectedAudioTrackId by remember { mutableStateOf<String?>(null) }
+
+    // Timeline zoom: both lanes take this as their pixelsPerSecond, so zooming affects
+    // clips and audio blocks identically -- a given clip never looks a different length
+    // relative to the other lane. Shared scroll state so scrolling one lane no longer
+    // leaves the other lane's playhead position visually orphaned off-screen, even though
+    // (see README) the two aren't drag-synced to each other.
+    var zoomFactor by remember { mutableFloatStateOf(1f) }
+    val pixelsPerSecond: Dp = BASE_PIXELS_PER_SECOND * zoomFactor
+    val timelineScrollState = rememberScrollState()
+
+    // Live position during "Play Timeline" playback, drawn as a playhead line on both
+    // lanes below. Null (no line drawn) outside that mode -- CLIP mode has no single
+    // project-wide position, just whichever moment the selected clip's own player is at.
+    var timelinePositionMs by remember { mutableStateOf(0L) }
     var exportRequestId by remember { mutableStateOf<UUID?>(null) }
     var exportBlockedMessage by remember { mutableStateOf<String?>(null) }
     val workManager = remember { WorkManager.getInstance(context) }
@@ -223,7 +239,8 @@ fun EditorScreen(
                 TimelinePreview(
                     composition = timelineComposition,
                     aspectRatio = uiState.project.aspectRatio.ratio,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    onPositionChanged = { timelinePositionMs = it }
                 )
             } else {
                 ClipPreview(
@@ -273,32 +290,47 @@ fun EditorScreen(
                         selectedClip?.let { viewModel.onCommand(EditCommand.SetClipVolume(it.id, volume)) }
                     }
                 )
+            }
 
-                TimelineStrip(
-                    clips = uiState.project.clips,
-                    selectedClipId = uiState.selectedClipId,
-                    onSelect = viewModel::selectClip,
-                    onReorder = { viewModel.onCommand(EditCommand.ReorderClips(it)) },
-                    onTrimCommitted = { clipId, start, end ->
-                        viewModel.onCommand(EditCommand.TrimClip(clipId, start, end))
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                )
+            // Always visible in both modes now (previously CLIP-mode only), so the
+            // playhead has somewhere to live during Timeline playback too, and the
+            // lanes/audio controls stay reachable while reviewing the whole project --
+            // matches the spec's "timeline is always visible below the preview" model
+            // rather than the editor swapping it out for a second full-screen mode.
+            ZoomRow(zoomFactor = zoomFactor, onZoomChange = { zoomFactor = it })
 
-                // Drag a track left/right to reposition it, drag its right edge to trim
-                // how long it plays -- see AudioTrackStrip for why this is a Box of
-                // absolutely-positioned blocks rather than a Row like the video clips above.
-                AudioTrackStrip(
-                    audioTracks = uiState.project.audioTracks,
-                    selectedTrackId = selectedAudioTrackId,
-                    projectDurationMs = uiState.project.durationMs,
-                    onSelect = { selectedAudioTrackId = it },
-                    onPositionCommitted = { trackId, start, duration ->
-                        viewModel.onCommand(EditCommand.SetAudioPosition(trackId, start, duration))
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                )
+            TimelineStrip(
+                clips = uiState.project.clips,
+                selectedClipId = uiState.selectedClipId,
+                onSelect = viewModel::selectClip,
+                onReorder = { viewModel.onCommand(EditCommand.ReorderClips(it)) },
+                onTrimCommitted = { clipId, start, end ->
+                    viewModel.onCommand(EditCommand.TrimClip(clipId, start, end))
+                },
+                modifier = Modifier.fillMaxWidth(),
+                pixelsPerSecond = pixelsPerSecond,
+                scrollState = timelineScrollState,
+                playheadMs = if (previewMode == PreviewMode.TIMELINE) timelinePositionMs else null
+            )
 
+            // Drag a track left/right to reposition it, drag its right edge to trim
+            // how long it plays -- see AudioTrackStrip for why this is a Box of
+            // absolutely-positioned blocks rather than a Row like the video clips above.
+            AudioTrackStrip(
+                audioTracks = uiState.project.audioTracks,
+                selectedTrackId = selectedAudioTrackId,
+                projectDurationMs = uiState.project.durationMs,
+                onSelect = { selectedAudioTrackId = it },
+                onPositionCommitted = { trackId, start, duration ->
+                    viewModel.onCommand(EditCommand.SetAudioPosition(trackId, start, duration))
+                },
+                modifier = Modifier.fillMaxWidth(),
+                pixelsPerSecond = pixelsPerSecond,
+                scrollState = timelineScrollState,
+                playheadMs = if (previewMode == PreviewMode.TIMELINE) timelinePositionMs else null
+            )
+
+            if (previewMode == PreviewMode.CLIP) {
                 OverlaysList(
                     textOverlays = uiState.project.textOverlays,
                     audioTracks = uiState.project.audioTracks,
@@ -459,6 +491,36 @@ private fun ClipStyleRow(
                 }
             }
         }
+    }
+}
+
+private const val MIN_ZOOM = 0.5f
+private const val MAX_ZOOM = 3f
+private const val ZOOM_STEP = 0.25f
+
+/** +/- zoom for the timeline lanes below, not pinch -- a pinch gesture over the same
+ *  area the trim/reorder/reposition drags already use is exactly the kind of overlapping-
+ *  gesture risk the last two rounds' bug reports came from; buttons carry none of that. */
+@Composable
+private fun ZoomRow(zoomFactor: Float, onZoomChange: (Float) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.End
+    ) {
+        TextButton(
+            onClick = { onZoomChange((zoomFactor - ZOOM_STEP).coerceAtLeast(MIN_ZOOM)) },
+            enabled = zoomFactor > MIN_ZOOM
+        ) { Text("−") }
+        Text(
+            "${(zoomFactor * 100).toInt()}%",
+            modifier = Modifier.align(Alignment.CenterVertically).padding(horizontal = 4.dp)
+        )
+        TextButton(
+            onClick = { onZoomChange((zoomFactor + ZOOM_STEP).coerceAtMost(MAX_ZOOM)) },
+            enabled = zoomFactor < MAX_ZOOM
+        ) { Text("+") }
     }
 }
 
