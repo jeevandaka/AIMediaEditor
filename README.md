@@ -631,11 +631,19 @@ into a constructed `EditCommand`).
 shape as the old cloud call (build a request, get a result, parse it),
 different transport underneath.
 
-**5. UI** (`EditorScreen.kt`, `ui/settings/ModelDownloadDialog.kt`) — an
-`AiPromptBar` at the bottom of the editor: a text field, an "AI model"
-button (opens the shared `ModelDownloadDialog`), and a "Send" button
-(disabled until the model is downloaded). Deliberately no chat
-thread/history — each request works from whatever the project looks like
+**5. UI** (`EditorScreen.kt`, `ui/settings/{ModelDownloadDialog, ModelDownloadBanner}.kt`)
+— an `AiPromptBar` at the bottom of the editor. Until the model is
+downloaded, this IS a `ModelDownloadBanner` — a full-width, impossible-
+to-miss card with a device-specific recommendation ("Recommended for
+your device (X.X GB RAM): Gemma 3 1B...", via `DeviceCapabilities`
+reading the real device's total RAM) and a "Download AI Model" button,
+shown IN PLACE OF the (otherwise-unusable) prompt field rather than
+behind a small settings button next to a disabled text field — a real
+discoverability gap the first version of this round's UI had, fixed
+after it was reported. Once downloaded, the bar becomes the actual text
+field, an "AI model" button (re-opens the same `ModelDownloadDialog`),
+and a "Send" button. Deliberately no chat thread/history — each request
+works from whatever the project looks like
 right now (which already reflects the result of the previous AI edit,
 since that's just `ProjectState` by the time the next prompt goes out),
 not from a remembered conversation. `EditorViewModel.submitAiPrompt()`
@@ -708,7 +716,12 @@ grid (unlike Home's own grid, there's no separate "enter selection mode"
 step — every tap toggles selection directly). Selecting results and
 tapping "Add to Project" hands off to the exact same `EDITOR_NEW` route
 Home's own selection flow uses, so nothing downstream needs to know
-results came from a search instead of the plain grid.
+results came from a search instead of the plain grid. Same as the editor
+(see item 5 above): before the model is downloaded, opening this screen
+lands directly on a `ModelDownloadBanner` in the results area (in place
+of the idle-state hint text) rather than requiring the user to notice
+the small "AI Search (setup)" button in the top bar first — Stage 1's
+plain "Search" still works either way, only Stage 2 is gated.
 
 ### Stage 2: AI library selection, now on-device
 
@@ -1117,7 +1130,7 @@ AIMediaEditor/
             │              AddAudioDialog}.kt
             ├── ui/projects/{ProjectsScreen, ProjectsViewModel}.kt
             ├── ui/search/{MediaSearchScreen, MediaSearchViewModel}.kt
-            ├── ui/settings/ModelDownloadDialog.kt
+            ├── ui/settings/{ModelDownloadDialog, ModelDownloadBanner}.kt
             ├── data/media/{MediaItem, MediaRepository, AudioRepository,
             │               VideoThumbnailLoader, AudioWaveformLoader}.kt
             ├── data/project/{ProjectRecord, ProjectRepository}.kt
@@ -1128,7 +1141,7 @@ AIMediaEditor/
             ├── ai/{EditCommandToolSchema, EditCommandParser, LlmJsonExtractor,
             │       LocalLlmEngine, LocalLlmModelManager, LocalEditCommandService,
             │       MediaSelectionToolSchema, MediaSelectionParser,
-            │       LocalMediaSelectionService}.kt
+            │       LocalMediaSelectionService, DeviceCapabilities}.kt
             ├── editor/{EditorViewModel, MediaMapping}.kt
             ├── editor/model/{ProjectState, EditCommand, ProjectSanitizer,
             │                 ProjectHistory, CropMath, TimelinePositions}.kt
@@ -1369,6 +1382,17 @@ it ever shipped.
   and no re-download/update path if a newer model version is published
   later — whatever was downloaded once is used until the app's storage is
   cleared.
+- `DeviceCapabilities`'s "recommended for your device" messaging (shown
+  in `ModelDownloadBanner`/`ModelDownloadDialog`) reads the device's real
+  total RAM via `ActivityManager.MemoryInfo`, but there is only ONE model
+  variant actually wired up (Gemma 3 1B) — a low-RAM device gets an
+  honest warning ("this may run slowly"), not an actually-smaller
+  alternative model, because this sandbox has no confirmed download URL
+  for a second variant to offer (see `LocalLlmModelManager`'s doc
+  comment). The `LOW_RAM_THRESHOLD_GB` (3.0) cutoff is a rough,
+  undocumented-by-Google heuristic, not a number sourced from an official
+  minimum-requirements page — confirm it against real low-RAM-device
+  behavior before treating it as authoritative.
 - Not verified: performance on low-RAM devices, 4K sources, thermal
   throttling during export, HDR tone-mapping.
 - Media indexing/search (see its own section above) has no LLM-based query
@@ -1520,10 +1544,16 @@ Manual, on a real device (no SDK in this sandbox to run instrumented tests):
 12. Create several projects, confirm Home's "Projects" row and the full
     Projects screen agree on what exists and show a sensible relative time
     ("Just now", "Xm ago", etc.) that updates on revisit.
-13a. In the editor, tap "AI model" next to the AI prompt bar → confirm the
-     `ModelDownloadDialog` opens showing the download explanation, a
-     "1. Accept license" button, a "2. Get token" button, and a token
-     field. Tap "1. Accept license" → confirm the device's own browser
+13a. Before downloading the model, open the editor on a project → confirm
+     you land directly on a `ModelDownloadBanner` card in place of the AI
+     prompt field (not a disabled field with a small button next to it),
+     showing a device-specific recommendation with your device's actual
+     RAM figure in it. Tap the banner's "Download AI Model" button →
+     confirm the `ModelDownloadDialog` opens showing the download
+     explanation, the same device-RAM recommendation (or a low-RAM
+     caveat if your test device has under ~3GB RAM), a "1. Accept
+     license" button, a "2. Get token" button, and a token field. Tap
+     "1. Accept license" → confirm the device's own browser
      opens to the Gemma3-1B-IT model page (not an in-app WebView). Back
      out, tap "2. Get token" → confirm the browser opens to
      huggingface.co's token settings page. Paste a real Hugging Face

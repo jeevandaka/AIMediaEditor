@@ -38,7 +38,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.aimediaeditor.app.ai.DeviceCapabilities
 import com.aimediaeditor.app.data.settings.ModelAccessTokenStore
+import com.aimediaeditor.app.ui.settings.ModelDownloadBanner
 import com.aimediaeditor.app.ui.settings.ModelDownloadDialog
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -212,6 +214,7 @@ fun EditorScreen(
     // download (see ModelDownloadDialog below) -- unlike the Anthropic API key this
     // replaced, nothing here is used on every AI request, only once per download.
     val tokenStore = remember { ModelAccessTokenStore(context) }
+    val ramGb = remember { DeviceCapabilities.totalRamGb(context) }
 
     // Timeline zoom: both lanes take this as their pixelsPerSecond, so zooming affects
     // clips and audio blocks identically -- a given clip never looks a different length
@@ -409,6 +412,7 @@ fun EditorScreen(
             AiPromptBar(
                 isLoading = uiState.isAiLoading,
                 isModelReady = uiState.isModelReady,
+                ramGb = ramGb,
                 assistantMessage = uiState.aiMessage,
                 errorMessage = uiState.aiError,
                 onOpenModelSettings = { showModelDownloadDialog = true },
@@ -490,18 +494,26 @@ private fun RenameProjectDialog(currentName: String, onDismiss: () -> Unit, onCo
  * that already lives in [ProjectState] by the time the next prompt goes out), not from
  * a remembered conversation. Runs entirely on-device (see [ModelDownloadDialog]) --
  * unlike the cloud version this replaced, there's no per-request credential, only a
- * one-time model download gate.
+ * one-time model download gate. When the model isn't downloaded yet, this shows
+ * [ModelDownloadBanner] IN PLACE OF the (otherwise-disabled) prompt field, rather than
+ * a small "AI model" button next to a field the user can't actually use yet -- the
+ * banner is the whole point of the bar until the model exists.
  */
 @Composable
 private fun AiPromptBar(
     isLoading: Boolean,
     isModelReady: Boolean,
+    ramGb: Double,
     assistantMessage: String?,
     errorMessage: String?,
     onOpenModelSettings: () -> Unit,
     onSubmit: (String) -> Unit,
     onDismissFeedback: () -> Unit
 ) {
+    if (!isModelReady) {
+        ModelDownloadBanner(ramGb = ramGb, onClick = onOpenModelSettings)
+        return
+    }
     var prompt by remember { mutableStateOf("") }
     Column(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
@@ -520,14 +532,8 @@ private fun AiPromptBar(
                     onSubmit(prompt)
                     prompt = ""
                 },
-                enabled = !isLoading && isModelReady && prompt.isNotBlank()
+                enabled = !isLoading && prompt.isNotBlank()
             ) { Text("Send") }
-        }
-        if (!isModelReady) {
-            Text(
-                "On-device AI model not downloaded yet -- tap \"AI model\" to set it up (one-time, offline afterward).",
-                style = MaterialTheme.typography.labelSmall
-            )
         }
         if (isLoading) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {

@@ -21,6 +21,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import com.aimediaeditor.app.ai.DeviceCapabilities
+import java.util.Locale
 
 /**
  * Shared entry point for the on-device AI model, used from both the editor's AI
@@ -38,7 +40,12 @@ import androidx.compose.ui.unit.dp
  * kind, ever. Two buttons open the device's own browser straight to the model's
  * license page and the token-creation page (real `ACTION_VIEW` intents, not a
  * WebView -- this app never touches the Hugging Face login flow itself), so the user
- * doesn't have to go find either page on their own. Originally written inline in
+ * doesn't have to go find either page on their own. The download explanation also
+ * reads the device's own total RAM ([com.aimediaeditor.app.ai.DeviceCapabilities]) so
+ * the recommendation is specific to the device it's showing on, not generic copy --
+ * see [ModelDownloadBanner], which surfaces this same recommendation even more
+ * prominently (in place of the feature it unlocks, not behind a settings button) as
+ * the entry point into this dialog. Originally written inline in
  * `EditorScreen.kt`; extracted here once [com.aimediaeditor.app.ui.search.MediaSearchScreen]
  * needed the exact same flow for AI search -- a genuine second caller, not
  * speculative reuse.
@@ -55,6 +62,8 @@ fun ModelDownloadDialog(
 ) {
     val context = LocalContext.current
     var token by remember { mutableStateOf(initialToken) }
+    val ramGb = remember { DeviceCapabilities.totalRamGb(context) }
+    val isLikelySuitable = remember(ramGb) { DeviceCapabilities.isLikelySuitable(ramGb) }
 
     fun openUrl(url: String) {
         // A plain ACTION_VIEW intent, not a WebView -- opens the device's own browser
@@ -92,12 +101,26 @@ fun ModelDownloadDialog(
                     }
                     else -> {
                         Text(
-                            "Downloads Google's Gemma model (roughly 500MB-1GB, one time only) " +
-                                "so AI features work fully offline afterward -- no project data or " +
-                                "search query is ever sent anywhere. It's completely free -- no " +
-                                "subscription, no per-use cost -- but the model file itself is " +
-                                "gated behind a free Hugging Face account and Google's Gemma " +
-                                "license, so a one-time sign-up is required before the first use.",
+                            String.format(
+                                Locale.US,
+                                "Downloads Google's Gemma 3 1B model (about 500MB, one time only) " +
+                                    "so AI features work fully offline afterward -- no project data " +
+                                    "or search query is ever sent anywhere. It's completely free -- " +
+                                    "no subscription, no per-use cost -- but the model file itself " +
+                                    "is gated behind a free Hugging Face account and Google's Gemma " +
+                                    "license, so a one-time sign-up is required before the first " +
+                                    "use.\n\nYour device has %.1f GB of RAM.%s",
+                                ramGb,
+                                if (isLikelySuitable) {
+                                    " This model is sized for phones like yours -- built for this " +
+                                        "app's edit-prompt and search use cases specifically."
+                                } else {
+                                    " That's on the lower end for this model -- it will likely " +
+                                        "still work, but may run slowly or occasionally fail under " +
+                                        "memory pressure. Still safe to try; there's currently no " +
+                                        "smaller model variant offered as an alternative."
+                                }
+                            ),
                             style = MaterialTheme.typography.bodySmall
                         )
                         Row(modifier = Modifier.padding(top = 8.dp)) {

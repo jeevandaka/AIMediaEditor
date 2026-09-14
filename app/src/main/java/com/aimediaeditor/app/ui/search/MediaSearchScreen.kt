@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
@@ -38,9 +39,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil3.compose.AsyncImage
+import com.aimediaeditor.app.ai.DeviceCapabilities
 import com.aimediaeditor.app.data.media.MediaItem
 import com.aimediaeditor.app.data.media.MediaType
 import com.aimediaeditor.app.data.settings.ModelAccessTokenStore
+import com.aimediaeditor.app.ui.settings.ModelDownloadBanner
 import com.aimediaeditor.app.ui.settings.ModelDownloadDialog
 
 /**
@@ -60,6 +63,7 @@ fun MediaSearchScreen(
 ) {
     val context = LocalContext.current
     val tokenStore = remember { ModelAccessTokenStore(context) }
+    val ramGb = remember { DeviceCapabilities.totalRamGb(context) }
     var query by remember { mutableStateOf("") }
     val uiState by viewModel.uiState.collectAsState()
     val modelState by viewModel.modelState.collectAsState()
@@ -116,7 +120,22 @@ fun MediaSearchScreen(
     ) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
             when (val state = uiState) {
-                is SearchUiState.Idle -> SearchHint()
+                is SearchUiState.Idle -> {
+                    if (modelState.isReady) {
+                        SearchHint()
+                    } else {
+                        // Lands the user directly on the download call to action the
+                        // moment they open this screen, rather than requiring them to
+                        // notice and tap the small "AI Search (setup)" button in the
+                        // top bar -- Stage 1's plain "Search" still works without it.
+                        Column(modifier = Modifier.fillMaxSize()) {
+                            ModelDownloadBanner(ramGb = ramGb, onClick = { showModelDownloadDialog = true })
+                            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                                SearchHint()
+                            }
+                        }
+                    }
+                }
                 is SearchUiState.Loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
                 is SearchUiState.Results -> {
                     if (state.items.isEmpty()) {
