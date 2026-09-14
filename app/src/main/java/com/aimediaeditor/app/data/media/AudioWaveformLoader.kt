@@ -24,6 +24,20 @@ import kotlin.math.max
 object AudioWaveformLoader {
 
     /**
+     * Upper bound on how long the decode loop below is allowed to run, checked once per
+     * iteration against wall-clock time. Exists purely so a malformed file or an unusual
+     * codec/stream combination that never signals end-of-stream can't spin this loop
+     * forever -- a real gap this round's initial version left open (flagged in the
+     * README as "no timeout... could be genuinely slow"). Deliberately a plain elapsed-
+     * time check, not `kotlinx.coroutines.withTimeoutOrNull` -- this loop's body is pure
+     * blocking Android-framework calls with no suspension points in it, so cooperative
+     * coroutine cancellation would have nothing to actually interrupt; a wall-clock check
+     * on every iteration targets the real risk (how long the caller waits) directly and
+     * needs no cancellation-cooperation reasoning to be confident it works.
+     */
+    private const val DECODE_TIMEOUT_MS = 20_000L
+
+    /**
      * Returns [bucketCount] peak-amplitude values in [0f, 1f], one per equal-width time
      * slice of the file's FULL duration (not a trimmed range -- the caller decides how
      * many leading buckets are actually "played", since an audio track here can only be
@@ -64,8 +78,15 @@ object AudioWaveformLoader {
                 val bufferInfo = MediaCodec.BufferInfo()
                 var sawInputEos = false
                 var sawOutputEos = false
+                val decodeStartedAtMs = System.currentTimeMillis()
 
                 while (!sawOutputEos) {
+                    if (System.currentTimeMillis() - decodeStartedAtMs > DECODE_TIMEOUT_MS) {
+                        // Never reached end-of-stream in time -- treat exactly like any
+                        // other decode failure (corrupt file, unsupported codec): return
+                        // null, don't hand back a partial/misleading waveform.
+                        return@withContext null
+                    }
                     if (!sawInputEos) {
                         val inputIndex = codec.dequeueInputBuffer(10_000L)
                         if (inputIndex >= 0) {
