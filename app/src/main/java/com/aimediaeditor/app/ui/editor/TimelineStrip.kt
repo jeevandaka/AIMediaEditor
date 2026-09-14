@@ -293,13 +293,12 @@ private fun ClipItem(
     }
 }
 
-/** A 2.dp red line at [positionMs] -- not private: AudioTrackStrip draws the identical
- *  line at the identical timestamp, so the two lanes' playheads visually agree even
- *  though they scroll independently (see README). Each is pinned to a timestamp within
- *  its OWN scrollable content rather than to a shared screen position, so both stay
- *  correct regardless of either lane's current scroll offset. */
+/** A 2.dp vertical line at [positionMs] -- shared by [Playhead] and [SnapGuide] so both
+ *  lanes' lines are pinned the same way: within each lane's OWN scrollable content rather
+ *  than a shared screen position, so they stay correct regardless of that lane's current
+ *  scroll offset (see README on why the two lanes' independent scrolling matters here). */
 @Composable
-internal fun BoxScope.Playhead(positionMs: Long, pixelsPerSecond: Dp) {
+private fun BoxScope.TimelineMarkerLine(positionMs: Long, pixelsPerSecond: Dp, color: Color) {
     val density = LocalDensity.current
     val pixelsPerMs = with(density) { pixelsPerSecond.toPx() } / 1000f
     val x = with(density) { (positionMs * pixelsPerMs).toDp() }
@@ -308,9 +307,45 @@ internal fun BoxScope.Playhead(positionMs: Long, pixelsPerSecond: Dp) {
             .offset(x = x)
             .width(2.dp)
             .fillMaxHeight()
-            .background(Color.Red)
+            .background(color)
     )
 }
+
+/** Not private: AudioTrackStrip draws the identical line at the identical timestamp, so
+ *  the two lanes' playheads visually agree. */
+@Composable
+internal fun BoxScope.Playhead(positionMs: Long, pixelsPerSecond: Dp) {
+    TimelineMarkerLine(positionMs, pixelsPerSecond, Color.Red)
+}
+
+/** Shown only while a drag (audio reposition/trim) is actively snapped to a clip
+ * boundary/playhead/timeline start -- visual confirmation that a snap happened, matching
+ * UX spec section 8/17's "show snapping guides," rather than the value silently jumping
+ * with no feedback. Not private: AudioTrackStrip is the current caller. */
+@Composable
+internal fun BoxScope.SnapGuide(positionMs: Long, pixelsPerSecond: Dp) {
+    TimelineMarkerLine(positionMs, pixelsPerSecond, Color.Yellow)
+}
+
+private const val SNAP_THRESHOLD_PX = 16f
+
+/**
+ * Snaps [valueMs] to the nearest of [points] if within [thresholdMs], returning the
+ * (possibly unchanged) value alongside the snap point used for a guide line, or null if
+ * nothing was close enough to snap to. Not private: AudioTrackStrip's reposition/trim
+ * drags use this against video clip boundaries -- the two live in the same project-
+ * timeline coordinate space (a clip's own trim handles don't: they edit source-relative
+ * time within one file, which has no "other clip's edge" to snap to, so this isn't
+ * applied there this round).
+ */
+internal fun snapToNearest(valueMs: Long, points: List<Long>, thresholdMs: Long): Pair<Long, Long?> {
+    val nearest = points.minByOrNull { kotlin.math.abs(it - valueMs) } ?: return valueMs to null
+    return if (kotlin.math.abs(nearest - valueMs) <= thresholdMs) nearest to nearest else valueMs to null
+}
+
+/** [SNAP_THRESHOLD_PX] converted to a millisecond tolerance at the current zoom -- not
+ *  private: AudioTrackStrip needs the same conversion for its own snap calls. */
+internal fun snapThresholdMs(pixelsPerMs: Float): Long = (SNAP_THRESHOLD_PX / pixelsPerMs).toLong()
 
 /** BoxScope extension so it can align itself to either edge of the caller's Box. Not
  *  private: AudioTrackStrip reuses this exact handle for the same drag-to-trim feel. */
@@ -318,7 +353,8 @@ internal fun BoxScope.Playhead(positionMs: Long, pixelsPerSecond: Dp) {
 internal fun BoxScope.TrimHandle(
     alignment: Alignment,
     onDrag: (deltaPx: Float) -> Unit,
-    onDragEnd: () -> Unit
+    onDragEnd: () -> Unit,
+    onDragCancel: () -> Unit = {}
 ) {
     Box(
         modifier = Modifier
@@ -329,7 +365,7 @@ internal fun BoxScope.TrimHandle(
             .pointerInput(Unit) {
                 detectDragGestures(
                     onDragEnd = onDragEnd,
-                    onDragCancel = {}
+                    onDragCancel = onDragCancel
                 ) { change, dragAmount ->
                     change.consume()
                     onDrag(dragAmount.x)

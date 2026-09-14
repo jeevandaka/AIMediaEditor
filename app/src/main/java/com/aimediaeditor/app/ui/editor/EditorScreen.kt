@@ -176,9 +176,8 @@ fun EditorScreen(
 
     // Timeline zoom: both lanes take this as their pixelsPerSecond, so zooming affects
     // clips and audio blocks identically -- a given clip never looks a different length
-    // relative to the other lane. Shared scroll state so scrolling one lane no longer
-    // leaves the other lane's playhead position visually orphaned off-screen, even though
-    // (see README) the two aren't drag-synced to each other.
+    // relative to the other lane. Shared scroll state so scrolling one lane moves the
+    // other too, rather than each scrolling independently.
     var zoomFactor by remember { mutableFloatStateOf(1f) }
     val pixelsPerSecond: Dp = BASE_PIXELS_PER_SECOND * zoomFactor
     val timelineScrollState = rememberScrollState()
@@ -187,6 +186,23 @@ fun EditorScreen(
     // lanes below. Null (no line drawn) outside that mode -- CLIP mode has no single
     // project-wide position, just whichever moment the selected clip's own player is at.
     var timelinePositionMs by remember { mutableStateOf(0L) }
+
+    // Where an audio track's reposition/trim drag snaps to: the start of the timeline,
+    // the end of every video clip (their "seams," since clips sit back-to-back with no
+    // gaps -- cumulative durationMs is exactly each clip's own start-of-next-clip point),
+    // and the playhead while one is showing. Recomputed only when one of those actually
+    // changes, not on every recomposition.
+    val snapPointsMs = remember(uiState.project.clips, previewMode, timelinePositionMs) {
+        buildList {
+            add(0L)
+            var acc = 0L
+            uiState.project.clips.forEach { clip ->
+                acc += clip.durationMs
+                add(acc)
+            }
+            if (previewMode == PreviewMode.TIMELINE) add(timelinePositionMs)
+        }
+    }
     var exportRequestId by remember { mutableStateOf<UUID?>(null) }
     var exportBlockedMessage by remember { mutableStateOf<String?>(null) }
     val workManager = remember { WorkManager.getInstance(context) }
@@ -327,7 +343,8 @@ fun EditorScreen(
                 modifier = Modifier.fillMaxWidth(),
                 pixelsPerSecond = pixelsPerSecond,
                 scrollState = timelineScrollState,
-                playheadMs = if (previewMode == PreviewMode.TIMELINE) timelinePositionMs else null
+                playheadMs = if (previewMode == PreviewMode.TIMELINE) timelinePositionMs else null,
+                snapPointsMs = snapPointsMs
             )
 
             if (previewMode == PreviewMode.CLIP) {

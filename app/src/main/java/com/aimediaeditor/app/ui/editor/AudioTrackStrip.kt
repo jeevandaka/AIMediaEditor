@@ -38,11 +38,11 @@ private const val MIN_AUDIO_DURATION_MS = 300L
  * A draggable lane for audio tracks, one block per track, positioned by [AudioTrack.startMs]
  * and sized by its effective duration -- rather than the fixed volume/loop-preset-only
  * controls that existed before ("attach it at a specific place" wasn't otherwise possible
- * without deleting and re-adding). Takes the same [pixelsPerSecond] scale [TimelineStrip]'s
- * video row does (both default to the same [BASE_PIXELS_PER_SECOND], and EditorScreen
- * passes both the same zoomed value) so a given timestamp lines up at the same horizontal
- * offset in both, even though the two currently scroll independently (see README) rather
- * than in a synced lockstep.
+ * without deleting and re-adding). Takes the same [pixelsPerSecond] scale and [ScrollState]
+ * [TimelineStrip]'s video row does (both default to the same [BASE_PIXELS_PER_SECOND], and
+ * EditorScreen passes both the same zoomed pixelsPerSecond and the same ScrollState
+ * instance) so a given timestamp lines up at the same horizontal offset in both, and
+ * scrolling either lane moves the other in lockstep.
  *
  * Unlike [TimelineStrip]'s clips, tracks here are NOT laid out back-to-back in a Row --
  * each is absolutely positioned by its own startMs, since two tracks can legitimately
@@ -58,7 +58,10 @@ fun AudioTrackStrip(
     modifier: Modifier = Modifier,
     pixelsPerSecond: Dp = BASE_PIXELS_PER_SECOND,
     scrollState: ScrollState = rememberScrollState(),
-    playheadMs: Long? = null
+    playheadMs: Long? = null,
+    // Video clip boundaries (plus timeline start/the playhead) that reposition/trim drags
+    // snap to -- see TimelineStrip.snapToNearest for why this is audio-only for now.
+    snapPointsMs: List<Long> = emptyList()
 ) {
     if (audioTracks.isEmpty()) return
 
@@ -67,6 +70,10 @@ fun AudioTrackStrip(
     val totalWidth: Dp = with(density) {
         (projectDurationMs.coerceAtLeast(1000L) * pixelsPerMs).toDp()
     }
+    // Lifted up here (not local to one AudioTrackBlock) because the guide line is drawn
+    // as a sibling of the blocks, in the lane's own absolute coordinate space -- drawing
+    // it inside a block's own Box would double-apply that block's startDp offset.
+    var activeSnapMs by remember { mutableStateOf<Long?>(null) }
 
     // Two nested boxes on purpose: the outer one is the scrollable VIEWPORT, sized by
     // whatever its own parent gives it (fillMaxWidth from EditorScreen) -- that's what
@@ -75,9 +82,9 @@ fun AudioTrackStrip(
     // Putting an explicit width on the SAME box as horizontalScroll (as an earlier version
     // of this file did) collapses that distinction -- the "viewport" and "content" width
     // become the same box, which is what made every drag on it fail to register correctly.
-    // The playhead is a THIRD child of this same outer box (a sibling of the content box,
-    // not inside it) so it scrolls in step with the tracks and stays pinned to the right
-    // timestamp regardless of this lane's own scroll position.
+    // The playhead and snap guide are further children of this same outer box (siblings of
+    // the content box, not inside it) so they scroll in step with the tracks and stay
+    // pinned to the right timestamp regardless of this lane's own scroll position.
     Box(
         modifier = modifier
             .horizontalScroll(scrollState)
@@ -91,14 +98,17 @@ fun AudioTrackStrip(
                     isSelected = track.id == selectedTrackId,
                     projectDurationMs = projectDurationMs,
                     pixelsPerMs = pixelsPerMs,
+                    snapPointsMs = snapPointsMs,
                     onSelect = { onSelect(track.id) },
-                    onPositionCommitted = onPositionCommitted
+                    onPositionCommitted = onPositionCommitted,
+                    onSnapChanged = { activeSnapMs = it }
                 )
             }
         }
         if (playheadMs != null) {
             Playhead(playheadMs, pixelsPerSecond)
         }
+        activeSnapMs?.let { SnapGuide(it, pixelsPerSecond) }
     }
 }
 
@@ -108,8 +118,10 @@ private fun AudioTrackBlock(
     isSelected: Boolean,
     projectDurationMs: Long,
     pixelsPerMs: Float,
+    snapPointsMs: List<Long>,
     onSelect: () -> Unit,
-    onPositionCommitted: (trackId: String, startMs: Long, durationMs: Long) -> Unit
+    onPositionCommitted: (trackId: String, startMs: Long, durationMs: Long) -> Unit,
+    onSnapChanged: (Long?) -> Unit
 ) {
     val density = LocalDensity.current
     val maxDuration = (track.sourceDurationMs.takeIf { it > 0L } ?: projectDurationMs)
@@ -158,12 +170,18 @@ private fun AudioTrackBlock(
                 .pointerInput(track.id) {
                     detectDragGestures(
                         onDragStart = { onSelect() },
-                        onDragEnd = { onPositionCommitted(track.id, liveStart, liveDuration) },
-                        onDragCancel = { liveStart = track.startMs }
+                        onDragEnd = {
+                            onPositionCommitted(track.id, liveStart, liveDuration)
+                            onSnapChanged(null)
+                        },
+                        onDragCancel = { liveStart = track.startMs; onSnapChanged(null) }
                     ) { change, dragAmount ->
                         change.consume()
                         val maxStart = (projectDurationMs - liveDuration).coerceAtLeast(0L)
-                        liveStart = (liveStart + (dragAmount.x / pixelsPerMs).toLong()).coerceIn(0L, maxStart)
+                        val raw = (liveStart + (dragAmount.x / pixelsPerMs).toLong()).coerceIn(0L, maxStart)
+                        val (snapped, guide) = snapToNearest(raw, snapPointsMs, snapThresholdMs(pixelsPerMs))
+                        liveStart = snapped.coerceIn(0L, maxStart)
+                        onSnapChanged(guide)
                     }
                 }
         ) {
@@ -177,10 +195,24 @@ private fun AudioTrackBlock(
         TrimHandle(
             alignment = Alignment.CenterEnd,
             onDrag = { deltaPx ->
-                liveDuration = (liveDuration + (deltaPx / pixelsPerMs).toLong())
+                val rawDuration = (liveDuration + (deltaPx / pixelsPerMs).toLong())
                     .coerceIn(MIN_AUDIO_DURATION_MS, maxDuration)
+                val (snappedEnd, guide) = snapToNearest(
+                    liveStart + rawDuration,
+                    snapPointsMs,
+                    snapThresholdMs(pixelsPerMs)
+                )
+                liveDuration = (snappedEnd - liveStart).coerceIn(MIN_AUDIO_DURATION_MS, maxDuration)
+                onSnapChanged(guide)
             },
-            onDragEnd = { onPositionCommitted(track.id, liveStart, liveDuration) }
+            onDragEnd = {
+                onPositionCommitted(track.id, liveStart, liveDuration)
+                onSnapChanged(null)
+            },
+            onDragCancel = {
+                liveDuration = track.effectiveDurationMs(projectDurationMs)
+                onSnapChanged(null)
+            }
         )
     }
 }

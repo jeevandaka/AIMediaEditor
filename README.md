@@ -27,15 +27,15 @@ here on, "UX spec section N" means this new document; a bare "spec section
 N" still means the original product spec, as everywhere earlier in this
 README.
 
-**This round, from Tier 1:** a visible timeline playhead and pinch-free
-zoom (+/- buttons), covered under "What's actually here" below. Still
-missing from Tier 1: true drag-and-drop media placement (media is added by
-selecting then tapping "Add to Project," not dragged onto the timeline),
-audio waveforms (blocks are still solid colour), snapping (drags are free-
-form, no snap-to-clip-edge/playhead), on-canvas direct manipulation for
-text (position is still 3 dialog presets, not drag-to-move on the preview),
-transitions (none exist), and a real multi-effect stack (one filter per
-clip, not a reorderable list of effects).
+**Built against Tier 1 so far:** a visible timeline playhead and pinch-free
+zoom (+/- buttons), and audio drag/trim snapping to clip edges — both
+covered under "What's actually here" below. Still missing from Tier 1: true
+drag-and-drop media placement (media is added by selecting then tapping
+"Add to Project," not dragged onto the timeline), audio waveforms (blocks
+are still solid colour), on-canvas direct manipulation for text (position
+is still 3 dialog presets, not drag-to-move on the preview), transitions
+(none exist), and a real multi-effect stack (one filter per clip, not a
+reorderable list of effects).
 
 ## Bug fixes (reported from a real device)
 
@@ -245,6 +245,27 @@ adding a new multi-touch gesture on top of gestures already reported
 broken once felt like the wrong moment to take that risk blind. +/- buttons
 get the same outcome with no gesture-conflict surface at all.
 
+**7. Snapping (UX spec section 8/17, Tier 1).** Dragging an audio track's
+position (the reposition grip) or its length (the right trim handle) now
+snaps to the nearest video clip boundary, the timeline start, or the
+current playhead, within a small pixel tolerance (`snapThresholdMs`,
+scaled by zoom so the tolerance stays a constant on-screen distance rather
+than a constant time window). A yellow guide line appears at the point
+being snapped to, per the UX spec's "show snapping guides" — silently
+jumping a dragged value with no visual confirmation was already flagged
+as a UX defect in an earlier round's crop-overlay bug, so this round's
+snap doesn't repeat it.
+
+Deliberately audio-only, not applied to a video clip's own trim handles:
+those edit *source-relative* time (an offset into that one clip's own
+file), which has no "other clip's edge" in the same coordinate space to
+snap to — a video clip's trim boundary and another clip's project-timeline
+position aren't comparable numbers. An audio track's `startMs` genuinely
+lives in project-timeline coordinates (same space as clip boundaries),
+which is what makes snapping it meaningful. Snapping to *other audio
+tracks'* edges, and to markers/beats (neither of which exist in this app
+yet), are both explicitly out of scope this round, not silently dropped.
+
 ## What's verified vs. not, this round
 
 The persistence work above is new, plain-Kotlin logic with no Media3/codec
@@ -298,6 +319,16 @@ app's own history this round is "assumed a Compose layout/gesture pattern
 would just work, shipped it, was wrong" three separate times — see "Bug
 fixes" above), and whether the 100ms poll reads as smooth rather than
 visibly stepping.
+
+Snapping is the same kind of risk as the playhead/zoom work — no
+serialization surface, pure Compose arithmetic (`snapToNearest` is a plain
+function over `Long`s and was traced by hand against the same three cases
+that matter: a value already exactly on a snap point, a value just outside
+the threshold that should NOT snap, and a value just inside it that
+should), but the actual *feel* of a snap catching correctly mid-drag on a
+touchscreen is exactly the category of thing this round's own bug fixes
+above were wrong about from static reading alone. Treat it as unverified
+until confirmed on-device, same as the playhead/zoom work.
 
 ## What's not here yet
 
@@ -428,6 +459,10 @@ be parsed into once the prompt UI is built. When that's wired up:
   not draggable to scrub (both are the UX spec's Tier 1 asks; the
   README's "Adopting the UX spec" section explains why pinch was held
   back this round specifically).
+- Snapping only applies to audio track drags, only against video clip
+  boundaries/timeline start/the playhead — not to a video clip's own trim
+  handles (different coordinate space, see "What's actually here"), not to
+  other audio tracks' edges, and not to markers/beats (neither exists yet).
 - Crop is reposition-only within 9:16/16:9/1:1/4:5 — no freeform,
   drag-to-resize crop rectangle yet (requested, not yet built).
 - The timeline strip's video filmstrip (`VideoThumbnailLoader`) has no
@@ -508,6 +543,14 @@ Manual, on a real device (no SDK in this sandbox to run instrumented tests):
     stepping) as the project plays, staying at the same horizontal position
     in both lanes. Tap "Back to Editing" → confirm the playhead disappears
     (CLIP mode has no single project-wide position to show one at).
+9k. Add an audio track, then drag its reposition grip near a video clip's
+    boundary (or the timeline start) → confirm it snaps into place (a
+    yellow guide line appears at the snap point while dragging) rather than
+    landing at an arbitrary pixel offset. Drag far from any boundary →
+    confirm it does NOT snap and the guide line doesn't appear. Do the same
+    with the right trim handle (dragging the track's end near a boundary).
+    Cancel a drag partway (if your test setup allows it) → confirm the
+    yellow guide clears rather than staying stuck on screen.
 10. Create a project, make an edit, background the app (Home button) without
     exporting, then kill the app from Recents → relaunch → open it from
     Home's "Projects" row or the Projects screen → confirm the edit is still
