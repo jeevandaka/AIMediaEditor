@@ -100,18 +100,23 @@ object CompositionBuilder {
      * axis flips, same as the crop conversion. Verified for all three position
      * presets plus both extremes: top maps above centre, centre to exactly 0,
      * bottom below centre.
+     *
+     * xPositionFraction (0 = left) becomes an NDC anchor with NO flip needed, unlike Y:
+     * NDC's X axis already increases left-to-right, the same direction xPositionFraction
+     * does, so 0->-1 (left), 0.5->0 (centre), 1->+1 (right) is a plain linear map.
      */
     private fun textOverlayEffect(overlays: List<TextOverlay>): OverlayEffect? {
         if (overlays.isEmpty()) return null
         val textureOverlays: List<TextureOverlay> = overlays.map { overlay ->
             val spannable = SpannableString(overlay.text)
+            val anchorX = 2f * overlay.xPositionFraction.coerceIn(0f, 1f) - 1f
             val anchorY = 1f - 2f * overlay.yPositionFraction.coerceIn(0f, 1f)
             val visible = StaticOverlaySettings.Builder()
-                .setBackgroundFrameAnchor(0f, anchorY)
+                .setBackgroundFrameAnchor(anchorX, anchorY)
                 .setAlphaScale(1f)
                 .build()
             val hidden = StaticOverlaySettings.Builder()
-                .setBackgroundFrameAnchor(0f, anchorY)
+                .setBackgroundFrameAnchor(anchorX, anchorY)
                 .setAlphaScale(0f)
                 .build()
             object : Media3TextOverlay() {

@@ -3,17 +3,23 @@
 package com.aimediaeditor.app.ui.editor
 
 import android.net.Uri
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -21,6 +27,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -40,6 +47,7 @@ import coil3.compose.AsyncImage
 import com.aimediaeditor.app.data.media.MediaType
 import com.aimediaeditor.app.editor.model.FilterType
 import com.aimediaeditor.app.editor.model.FocalPoint
+import com.aimediaeditor.app.editor.model.TextOverlay
 import com.aimediaeditor.app.editor.model.VideoClip
 import com.aimediaeditor.app.editor.model.computeCropWindow
 
@@ -73,6 +81,8 @@ fun ClipPreview(
     exoPlayer: ExoPlayer,
     targetAspectRatio: Float,
     onReframeCommitted: (FocalPoint) -> Unit,
+    textOverlays: List<TextOverlay> = emptyList(),
+    onTextPositionCommitted: (overlayId: String, xFraction: Float, yFraction: Float) -> Unit = { _, _, _ -> },
     modifier: Modifier = Modifier
 ) {
     if (clip == null) {
@@ -92,6 +102,7 @@ fun ClipPreview(
     }
 
     val sourceAspectRatio = clip.sourceWidth.toFloat() / clip.sourceHeight.toFloat()
+    var contentBoxSize by remember { mutableStateOf(IntSize.Zero) }
 
     // Outer box is a FIXED height -- never sized by the source's own aspect ratio.
     // The inner box is what actually carries the aspect ratio, letterboxed/pillarboxed
@@ -106,6 +117,7 @@ fun ClipPreview(
             modifier = Modifier
                 .align(Alignment.Center)
                 .aspectRatio(sourceAspectRatio)
+                .onSizeChanged { contentBoxSize = it }
         ) {
             when (clip.sourceType) {
                 MediaType.VIDEO -> {
@@ -139,7 +151,65 @@ fun ClipPreview(
                 targetAspectRatio = targetAspectRatio,
                 onReframeCommitted = onReframeCommitted
             )
+
+            textOverlays.forEach { overlay ->
+                TextOverlayHandle(
+                    overlay = overlay,
+                    boxSize = contentBoxSize,
+                    onPositionCommitted = onTextPositionCommitted
+                )
+            }
         }
+    }
+}
+
+/**
+ * A draggable handle for one text overlay -- shows its text so the user can tell which
+ * overlay they're moving, NOT a preview of the final rendered look (no font/size/colour
+ * styling; that's Media3-default, per README). This is a positioning tool in the same
+ * spirit as [CropOverlay]'s dashed rectangle, not a second "what will this look like"
+ * renderer: the burned-in Composition (CompositionBuilder + TimelinePreview) stays the
+ * one place that actually shows the final result, which is exactly the lesson an earlier
+ * round's aspect-ratio bug already forced onto the crop/preview code -- deliberately not
+ * repeating it here for text.
+ *
+ * BiasAlignment (Compose's -1f..+1f center-relative positioning) does the actual
+ * placement, so the handle is centred on the anchor point regardless of the handle's own
+ * size (which depends on the overlay's text length) -- no manual half-width offset math,
+ * and no chicken-and-egg sizing problem to solve.
+ */
+@Composable
+private fun BoxScope.TextOverlayHandle(
+    overlay: TextOverlay,
+    boxSize: IntSize,
+    onPositionCommitted: (overlayId: String, xFraction: Float, yFraction: Float) -> Unit
+) {
+    var liveX by remember(overlay.id, overlay.xPositionFraction) { mutableStateOf(overlay.xPositionFraction) }
+    var liveY by remember(overlay.id, overlay.yPositionFraction) { mutableStateOf(overlay.yPositionFraction) }
+
+    Box(
+        modifier = Modifier
+            .align(BiasAlignment(liveX * 2f - 1f, liveY * 2f - 1f))
+            .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(4.dp))
+            .border(BorderStroke(1.dp, Color.White.copy(alpha = 0.85f)), RoundedCornerShape(4.dp))
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .pointerInput(overlay.id, overlay.xPositionFraction, overlay.yPositionFraction) {
+                detectDragGestures(
+                    onDragEnd = { onPositionCommitted(overlay.id, liveX, liveY) },
+                    onDragCancel = {
+                        liveX = overlay.xPositionFraction
+                        liveY = overlay.yPositionFraction
+                    }
+                ) { change, dragAmount ->
+                    change.consume()
+                    if (boxSize.width > 0 && boxSize.height > 0) {
+                        liveX = (liveX + dragAmount.x / boxSize.width).coerceIn(0f, 1f)
+                        liveY = (liveY + dragAmount.y / boxSize.height).coerceIn(0f, 1f)
+                    }
+                }
+            }
+    ) {
+        Text(overlay.text, color = Color.White, style = MaterialTheme.typography.labelSmall, maxLines = 1)
     }
 }
 

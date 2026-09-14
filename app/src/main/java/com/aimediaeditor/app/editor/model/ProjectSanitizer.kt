@@ -142,6 +142,19 @@ object ProjectSanitizer {
             }
         )
 
+        is EditCommand.SetTextPosition -> state.copy(
+            textOverlays = state.textOverlays.map {
+                if (it.id == command.overlayId) {
+                    it.copy(
+                        xPositionFraction = command.xFraction.coerceIn(0f, 1f),
+                        yPositionFraction = command.yFraction.coerceIn(0f, 1f)
+                    )
+                } else {
+                    it
+                }
+            }
+        )
+
         is EditCommand.RemoveTextOverlay ->
             state.copy(textOverlays = state.textOverlays.filterNot { it.id == command.overlayId })
 

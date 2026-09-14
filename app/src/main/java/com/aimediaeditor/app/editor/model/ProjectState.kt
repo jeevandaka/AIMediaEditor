@@ -121,5 +121,12 @@ data class TextOverlay(
     val text: String,
     val startMs: Long,
     val endMs: Long,
-    val yPositionFraction: Float // 0f (top) .. 1f (bottom)
+    val yPositionFraction: Float, // 0f (top) .. 1f (bottom)
+    // Added this round: X was always centre (0.5) with no way to change it -- a real gap
+    // against the UX spec's "direct manipulation" principle (drag to move, not one axis
+    // constrained to a fixed value). Defaults to centre so nothing that already
+    // constructs a TextOverlay changes behaviour, and so a project saved before this
+    // field existed decodes cleanly (no key in old JSON -> falls back to this default,
+    // not a crash -- same pattern as AudioTrack.durationMs above).
+    val xPositionFraction: Float = 0.5f // 0f (left) .. 1f (right)
 )

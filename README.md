@@ -2,7 +2,8 @@
 
 Status: **manual editor + real Media3 export pipeline (device-verified) +
 project persistence/autosave (JVM-verified) + several real-device bug fixes
-+ a draggable audio timeline + a timeline playhead and zoom (below).** The
++ a draggable audio timeline + a timeline playhead and zoom + audio
+snapping + on-canvas text positioning (below).** The
 AI layer (natural-language prompts, media search/indexing) is not built yet
 — everything below is the conventional editor spec section 9 requires to
 exist on its own, plus the non-destructive EDL/command core spec section 21
@@ -28,14 +29,14 @@ N" still means the original product spec, as everywhere earlier in this
 README.
 
 **Built against Tier 1 so far:** a visible timeline playhead and pinch-free
-zoom (+/- buttons), and audio drag/trim snapping to clip edges — both
-covered under "What's actually here" below. Still missing from Tier 1: true
-drag-and-drop media placement (media is added by selecting then tapping
-"Add to Project," not dragged onto the timeline), audio waveforms (blocks
-are still solid colour), on-canvas direct manipulation for text (position
-is still 3 dialog presets, not drag-to-move on the preview), transitions
-(none exist), and a real multi-effect stack (one filter per clip, not a
-reorderable list of effects).
+zoom (+/- buttons), audio drag/trim snapping to clip edges, and on-canvas
+direct manipulation for text position (drag the overlay on the preview
+itself) — all covered under "What's actually here" below. Still missing
+from Tier 1: true drag-and-drop media placement (media is added by
+selecting then tapping "Add to Project," not dragged onto the timeline),
+audio waveforms (blocks are still solid colour), transitions (none exist),
+and a real multi-effect stack (one filter per clip, not a reorderable list
+of effects).
 
 ## Bug fixes (reported from a real device)
 
@@ -266,6 +267,36 @@ which is what makes snapping it meaningful. Snapping to *other audio
 tracks'* edges, and to markers/beats (neither of which exist in this app
 yet), are both explicitly out of scope this round, not silently dropped.
 
+**8. On-canvas text positioning (UX spec section 17, Tier 1).** A text
+overlay visible in the single-clip preview (`ClipPreview`) can now be
+dragged directly on the preview to move it, instead of only choosing from
+3 fixed Y-position dialog presets. `TextOverlay` gained
+`xPositionFraction` (defaulting to 0.5, centre, so every existing overlay
+and every saved project keeps its prior on-screen position unchanged) to
+go with the existing `yPositionFraction`; a new `SetTextPosition`
+command carries both fractions through `ProjectSanitizer` (clamped to
+`[0, 1]`) into `ProjectState`. `CompositionBuilder`'s text overlay effect
+now computes an X anchor the same way it already computed the Y anchor —
+`2f * fraction - 1f`, no flip needed for X since both the fraction
+convention and Media3's NDC X axis point left-to-right (Y needs
+`1f - 2f * fraction` because NDC Y points up while the fraction
+convention points down, which was already the case before this round).
+
+The on-canvas handle (`ClipPreview.TextOverlayHandle`) is deliberately a
+drag TOOL, not a second renderer of final appearance: it shows the
+overlay's text in a small bordered box positioned via `BiasAlignment` so
+it can be grabbed and dragged, and reports the final fraction back via
+`onTextPositionCommitted` only when the drag ends — it does not attempt
+to reproduce the burned-in overlay's actual font, size, or exact
+rendering. `CompositionBuilder` (export) and `TimelinePreview`/
+`ClipPreview`'s existing playback surface remain the single source of
+truth for what the text will actually look like, the same
+one-renderer-only lesson an earlier round's aspect-ratio bug established
+for cropping. Dragging only moves the visible handle live; the command
+(and the actual burned-in position) only updates on drag release, so a
+cancelled or accidental drag can't leave the project in a half-changed
+state.
+
 ## What's verified vs. not, this round
 
 The persistence work above is new, plain-Kotlin logic with no Media3/codec
@@ -329,6 +360,25 @@ should), but the actual *feel* of a snap catching correctly mid-drag on a
 touchscreen is exactly the category of thing this round's own bug fixes
 above were wrong about from static reading alone. Treat it as unverified
 until confirmed on-device, same as the playhead/zoom work.
+
+On-canvas text positioning has a genuine serialization surface
+(`TextOverlay.xPositionFraction`), and that part was re-verified the same
+way as the two checks above: the updated `@Serializable` shape was
+round-tripped again in the standalone JVM project, including a project
+saved *before* `xPositionFraction` existed (no such key in the JSON) to
+confirm it decodes using the 0.5 default rather than crashing — both
+passed. What's NOT verified: the Compose gesture and `BiasAlignment`
+positioning code in `ClipPreview.TextOverlayHandle`, and the new
+`anchorX` math in `CompositionBuilder`. The X-anchor formula is the exact
+same shape as the already-working Y-anchor formula (just without the
+flip, per the NDC-axis-direction reasoning above), which is why it's
+lower risk than a from-scratch formula would be — but "the same shape as
+code that works" is exactly what was true of the audio lane and video
+trim gesture code before those turned out to be broken by a competing
+gesture detector, so this is not being called verified on that basis
+alone. Needs an on-device check: drag a text overlay to several positions
+(centre, near each edge/corner), confirm the exported video burns the
+text in at the same position the on-canvas handle showed.
 
 ## What's not here yet
 
@@ -447,6 +497,11 @@ be parsed into once the prompt UI is built. When that's wired up:
 - No pagination in `MediaRepository` — fine for a few hundred items, wrong
   for a multi-thousand-item library.
 - Text overlay styling is Media3-default only (no size/colour/font control).
+- On-canvas text positioning supports drag-to-move (X and Y) only — no
+  on-canvas resize or rotate handle for text yet, and dragging near a
+  preview edge can push the handle's own bounding box (not just the text's
+  anchor point) outside the visible frame since the handle isn't clamped
+  to keep its full width on-screen, only its anchor fraction to `[0, 1]`.
 - Volume is flat per clip/track — no fades or automation.
 - Trimming an audio track's length only trims from the end, always starting
   at the source's own beginning — there's no way yet to skip past the start
@@ -551,6 +606,12 @@ Manual, on a real device (no SDK in this sandbox to run instrumented tests):
     with the right trim handle (dragging the track's end near a boundary).
     Cancel a drag partway (if your test setup allows it) → confirm the
     yellow guide clears rather than staying stuck on screen.
+9l. Add a text overlay, select the clip it's on, then drag the text handle
+    around the preview to several positions (centre, near each edge and
+    corner) → confirm it moves smoothly and stays where dropped. Confirm
+    Undo/Redo reverses/reapplies the position change. Export → confirm the
+    burned-in text lands where the on-canvas handle showed, not back at a
+    default position.
 10. Create a project, make an edit, background the app (Home button) without
     exporting, then kill the app from Recents → relaunch → open it from
     Home's "Projects" row or the Projects screen → confirm the edit is still

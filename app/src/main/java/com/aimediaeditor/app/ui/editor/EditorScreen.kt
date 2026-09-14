@@ -106,6 +106,22 @@ fun EditorScreen(
     val selectedClip = uiState.project.clips.firstOrNull { it.id == uiState.selectedClipId }
     var previewMode by remember { mutableStateOf(PreviewMode.CLIP) }
 
+    // Text overlays whose time window overlaps the SELECTED clip's own span on the
+    // project timeline -- these are the ones it makes sense to show a drag handle for in
+    // the single-clip preview, since that's the only clip currently visible there. An
+    // overlay spanning multiple clips gets a handle on each one it overlaps; dragging any
+    // of them moves the one underlying overlay (they all read/write the same id).
+    val visibleTextOverlays = remember(uiState.project.textOverlays, selectedClip, uiState.project.clips) {
+        val clip = selectedClip
+        if (clip == null) {
+            emptyList()
+        } else {
+            val clipStart = uiState.project.clipStartOffsetMs(clip.id)
+            val clipEnd = clipStart + clip.durationMs
+            uiState.project.textOverlays.filter { it.startMs < clipEnd && it.endMs > clipStart }
+        }
+    }
+
     LaunchedEffect(selectedClip?.id, previewMode) {
         if (previewMode != PreviewMode.CLIP) return@LaunchedEffect
         if (selectedClip != null && selectedClip.sourceType == MediaType.VIDEO) {
@@ -265,6 +281,10 @@ fun EditorScreen(
                     targetAspectRatio = uiState.project.aspectRatio.ratio,
                     onReframeCommitted = { focal ->
                         selectedClip?.let { viewModel.onCommand(EditCommand.SmartReframe(it.id, focal)) }
+                    },
+                    textOverlays = visibleTextOverlays,
+                    onTextPositionCommitted = { overlayId, x, y ->
+                        viewModel.onCommand(EditCommand.SetTextPosition(overlayId, x, y))
                     },
                     modifier = Modifier.fillMaxWidth()
                 )

@@ -36,6 +36,11 @@ sealed interface EditCommand {
     // together (drag-to-reposition and drag-to-trim are the same gesture family as
     // TrimClip/SmartReframe: live while dragging, one command on release).
     data class SetAudioPosition(val trackId: String, val startMs: Long, val durationMs: Long) : EditCommand
+    // Added this round: a text overlay's X position was always fixed at centre (0.5),
+    // with only Y adjustable, and only via 3 dialog presets -- no way to drag it into
+    // place on the preview like the UX spec's "direct manipulation" principle asks for.
+    // Commits on drag release, same as every other live-drag command in this taxonomy.
+    data class SetTextPosition(val overlayId: String, val xFraction: Float, val yFraction: Float) : EditCommand
     // Added in Phase 2: undo() can already reverse the most recent add, but a user
     // removing one specific earlier text/audio item shouldn't have to undo everything
     // that came after it too.
