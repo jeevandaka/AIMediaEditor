@@ -1,5 +1,7 @@
 package com.aimediaeditor.app.ui.editor
 
+import android.graphics.Bitmap
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -8,6 +10,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -17,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -26,15 +30,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import coil3.compose.AsyncImage
 import com.aimediaeditor.app.data.media.MediaType
+import com.aimediaeditor.app.data.media.VideoThumbnailLoader
 import com.aimediaeditor.app.editor.model.VideoClip
 import com.aimediaeditor.app.editor.model.maxTrimEndMs
 
@@ -48,6 +56,14 @@ internal val PIXELS_PER_SECOND = 56.dp
 // and which one wins isn't guaranteed. 64.dp leaves real clearance on both sides.
 internal val MIN_CLIP_WIDTH = 64.dp
 private const val MIN_CLIP_DURATION_MS = 200L
+
+/** mm:ss -- not private: AudioTrackStrip uses the same format for its own position label. */
+internal fun formatClock(ms: Long): String {
+    val totalSeconds = (ms / 1000L).coerceAtLeast(0L)
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return "%d:%02d".format(minutes, seconds)
+}
 
 /**
  * A plain (non-Lazy) horizontally scrollable Row -- there's no need for
@@ -179,11 +195,40 @@ private fun ClipItem(
                     .background(Color.Black.copy(alpha = 0.5f))
             )
         } else {
+            // A real frame from the source, not a solid colour block -- so the clip is
+            // recognizable and, critically, so the frame shown is the one AT THE CURRENT
+            // TRIM-IN POINT: this is literally "the first frame of what gets kept," which
+            // is the actual question a trim UI needs to answer. Re-fetched only when the
+            // trim is committed (clip.trimStartMs), not on every pixel of a live drag --
+            // extracting a frame isn't instant, so doing it mid-gesture would be janky.
+            val context = LocalContext.current
+            var thumbnail by remember(clip.id) { mutableStateOf<Bitmap?>(null) }
+            LaunchedEffect(clip.sourceUri, clip.trimStartMs) {
+                thumbnail = VideoThumbnailLoader.loadFrame(
+                    context,
+                    android.net.Uri.parse(clip.sourceUri),
+                    atUs = clip.trimStartMs * 1000L
+                )
+            }
+            thumbnail?.let { bmp ->
+                Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            }
+            // Start -> end, not just duration -- updates live while dragging a trim
+            // handle, so the exact moment being trimmed to is always visible instead of
+            // needing to let go and check. mm:ss to match what other editors show here,
+            // per the report that this lane read as a solid, unlabelled block before.
             Text(
-                "\u25B6 %.1fs".format(trimmedDurationMs / 1000f),
+                "${formatClock(liveStart)} \u2192 ${formatClock(liveEnd)}",
                 color = Color.White,
                 style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.align(Alignment.Center)
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .background(Color.Black.copy(alpha = 0.6f))
             )
         }
 

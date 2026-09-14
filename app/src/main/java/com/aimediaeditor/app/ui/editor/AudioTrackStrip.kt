@@ -123,8 +123,12 @@ private fun AudioTrackBlock(
             .background(if (isSelected) Color(0xFF2D6A4F) else Color(0xFF1B4332))
             .clickable(onClick = onSelect)
     ) {
+        // Position AND length, not just length -- the same "blind" problem the video
+        // clips had: a duration-only label doesn't say WHERE on the timeline this track
+        // starts, which is the whole point of a draggable, precisely-placeable track.
+        // mm:ss to match the video row's own label format.
         Text(
-            "♪ %.1fs".format(liveDuration / 1000f),
+            "♪ ${formatClock(liveStart)} · ${"%.1f".format(liveDuration / 1000f)}s",
             color = Color.White,
             style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.align(Alignment.CenterStart).padding(start = 4.dp)
