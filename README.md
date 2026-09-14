@@ -102,15 +102,10 @@ tell what the clip *was*, or exactly where the current trim points landed,
 short of letting go and checking. Two additions, both in `TimelineStrip.kt`:
 
 - **A real frame from the source**, not a placeholder. New
-  `data/media/VideoThumbnailLoader.kt` pulls one frame via
+  `data/media/VideoThumbnailLoader.kt` pulls a frame via
   `MediaMetadataRetriever` — core `android.media`, not Media3, so unlike
   some other pieces of this app its API surface isn't something this
-  sandbox has been unable to verify. The frame shown is specifically the
-  one **at the current trim-in point** (not always frame 0), because that's
-  the actual question a trim UI needs to answer: "what's the first frame of
-  what I'm keeping." It's re-fetched when the trim is *committed*, not on
-  every pixel of a live drag — extracting a frame isn't instant, so doing
-  it mid-gesture would be janky rather than helpful.
+  sandbox has been unable to verify.
 - **Start → end time labels in mm:ss**, updating live while a trim handle
   is being dragged, matching what the reported problem actually was: no way
   to know the exact moment being trimmed to without releasing and checking.
@@ -119,11 +114,25 @@ short of letting go and checking. Two additions, both in `TimelineStrip.kt`:
   indication of *where* on the timeline the track starts) via the same new
   `formatClock()` helper.
 
-Not done here: Home's media grid still shows a play glyph instead of a
-video frame (the original, still-true "no decoded video frame yet" known
-limitation) — this thumbnail loader could feed that too, but wasn't asked
-for and would touch a separate, already-working screen, so it's left as a
-natural but separate follow-up rather than pulled in here.
+**Follow-up to the follow-up**: one frame stretched/cropped across the
+whole clip doesn't represent a multi-second clip well — it's one moment,
+not "what happens in this clip." `loadFilmstrip()` now pulls several
+frames (up to 8, roughly one per 40.dp of clip width — a longer clip gets
+wider tiles covering more time each, rather than more extraction work) and
+tiles them across the clip, each sampled from the midpoint of its own
+slice of the *currently trimmed* range, so trimming the clip changes which
+moments the strip shows. One `MediaMetadataRetriever` is reused for every
+tile in a strip rather than one retriever per frame — re-opening the
+source file is the expensive part, not decoding an individual frame from
+an already-open one. Each tile fails independently (a bad frame just shows
+blank in that one slot) rather than losing the whole strip over one
+decoder hiccup.
+
+Not done here: Home's media grid and the Projects list still show a play
+glyph instead of a video frame (the original, still-true "no decoded video
+frame yet" known limitation) — this thumbnail loader could feed those too,
+but wasn't asked for and would touch separate, already-working screens, so
+it's left as a natural but separate follow-up rather than pulled in here.
 
 ## What's actually here
 
@@ -349,12 +358,15 @@ be parsed into once the prompt UI is built. When that's wired up:
   handle already works.
 - Crop is reposition-only within 9:16/16:9/1:1/4:5 — no freeform,
   drag-to-resize crop rectangle yet (requested, not yet built).
-- The timeline strip's video thumbnails (`VideoThumbnailLoader`) have no
+- The timeline strip's video filmstrip (`VideoThumbnailLoader`) has no
   cache beyond one composable's own `remember` — switching away from a clip
-  and back re-extracts the frame rather than reusing it, and a very large
-  source file may take a visible moment to show its frame. Home's media
-  grid and the Projects list still show a play glyph instead of a frame —
-  this loader isn't wired into either yet.
+  and back re-extracts every tile rather than reusing them, and a very
+  large source file may take a visible moment to fill in. Up to 8 frames
+  are extracted per clip (see the README's filmstrip note) — fine for a
+  handful of clips on screen, not something stress-tested against a very
+  long timeline with many clips visible at once. Home's media grid and the
+  Projects list still show a play glyph instead of a frame — this loader
+  isn't wired into either yet.
 - Single module, no DI framework.
 - No automated test suite wired into the Gradle build itself
   (`app/src/test`) despite `editor/model/` and `data/project/` being pure,
@@ -405,11 +417,13 @@ Manual, on a real device (no SDK in this sandbox to run instrumented tests):
     stops where you dragged it, not just where it visually looked right in
     the editor — see the README's verification caveat on the audio-side
     `ClippingConfiguration` change).
-9g. Select a video clip on the timeline → confirm a real frame from the
-    video appears (not a solid colour block) and the label under it reads
-    as a start → end time range, not just a duration. Drag a trim handle
-    and confirm the time label updates live as you drag, then release and
-    confirm the frame refreshes to match the new trim-in point.
+9g. Select a video clip on the timeline → confirm several distinct frames
+    tile across the clip (not one frame stretched across it, not a solid
+    colour block), and the label under it reads as a start → end time
+    range, not just a duration. Drag a trim handle and confirm the time
+    label updates live as you drag, then release and confirm the filmstrip
+    refreshes to the new trimmed range. Trim a clip much shorter → confirm
+    it still shows at least one tile and doesn't crash or go blank.
 10. Create a project, make an edit, background the app (Home button) without
     exporting, then kill the app from Recents → relaunch → open it from
     Home's "Projects" row or the Projects screen → confirm the edit is still

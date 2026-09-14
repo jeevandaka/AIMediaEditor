@@ -57,6 +57,12 @@ internal val PIXELS_PER_SECOND = 56.dp
 internal val MIN_CLIP_WIDTH = 64.dp
 private const val MIN_CLIP_DURATION_MS = 200L
 
+// Filmstrip tiling: aim for one frame roughly every 40.dp of clip width, capped at 8 so a
+// long clip doesn't extract dozens of frames -- past 8 tiles the individual tiles get
+// wider instead, still evenly covering the clip, just each one spanning more time.
+private val FILMSTRIP_TILE_WIDTH = 40.dp
+private const val MAX_FILMSTRIP_TILES = 8
+
 /** mm:ss -- not private: AudioTrackStrip uses the same format for its own position label. */
 internal fun formatClock(ms: Long): String {
     val totalSeconds = (ms / 1000L).coerceAtLeast(0L)
@@ -195,28 +201,42 @@ private fun ClipItem(
                     .background(Color.Black.copy(alpha = 0.5f))
             )
         } else {
-            // A real frame from the source, not a solid colour block -- so the clip is
-            // recognizable and, critically, so the frame shown is the one AT THE CURRENT
-            // TRIM-IN POINT: this is literally "the first frame of what gets kept," which
-            // is the actual question a trim UI needs to answer. Re-fetched only when the
-            // trim is committed (clip.trimStartMs), not on every pixel of a live drag --
-            // extracting a frame isn't instant, so doing it mid-gesture would be janky.
+            // A real filmstrip -- several frames tiled across the clip's width, each one
+            // sampled from its own slice of the CURRENTLY TRIMMED range -- not one frame
+            // stretched/cropped to cover the whole clip regardless of length. One frame
+            // per slice is what actually represents "what happens across this clip";
+            // a single frame just shows one moment no matter how long the clip is.
+            // Re-fetched when the trim is committed, not on every pixel of a live drag --
+            // extracting several frames isn't instant, so doing it mid-gesture would be
+            // janky rather than helpful.
             val context = LocalContext.current
-            var thumbnail by remember(clip.id) { mutableStateOf<Bitmap?>(null) }
-            LaunchedEffect(clip.sourceUri, clip.trimStartMs) {
-                thumbnail = VideoThumbnailLoader.loadFrame(
+            val tileCount = remember(widthDp) {
+                kotlin.math.ceil(widthDp / FILMSTRIP_TILE_WIDTH).toInt().coerceIn(1, MAX_FILMSTRIP_TILES)
+            }
+            var filmstrip by remember(clip.id) { mutableStateOf<List<Bitmap?>>(emptyList()) }
+            LaunchedEffect(clip.sourceUri, clip.trimStartMs, clip.trimEndMs, tileCount) {
+                filmstrip = VideoThumbnailLoader.loadFilmstrip(
                     context,
                     android.net.Uri.parse(clip.sourceUri),
-                    atUs = clip.trimStartMs * 1000L
+                    startMs = clip.trimStartMs,
+                    endMs = clip.trimEndMs,
+                    tileCount = tileCount
                 )
             }
-            thumbnail?.let { bmp ->
-                Image(
-                    bitmap = bmp.asImageBitmap(),
-                    contentDescription = null,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
-                )
+            Row(modifier = Modifier.fillMaxSize()) {
+                repeat(tileCount) { i ->
+                    val bmp = filmstrip.getOrNull(i)
+                    Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                        if (bmp != null) {
+                            Image(
+                                bitmap = bmp.asImageBitmap(),
+                                contentDescription = null,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop
+                            )
+                        }
+                    }
+                }
             }
             // Start -> end, not just duration -- updates live while dragging a trim
             // handle, so the exact moment being trimmed to is always visible instead of

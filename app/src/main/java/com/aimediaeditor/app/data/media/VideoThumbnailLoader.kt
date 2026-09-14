@@ -35,4 +35,44 @@ object VideoThumbnailLoader {
                 retriever.release()
             }
         }
+
+    /**
+     * A real filmstrip: [tileCount] frames, evenly spaced across [startMs]..[endMs] (the
+     * clip's CURRENT trim range, not the whole source), each centred in its own slice --
+     * tile i covers the time range startMs + i*span/tileCount .. startMs + (i+1)*span/tileCount,
+     * sampled at its midpoint. One [MediaMetadataRetriever] is opened once and reused for
+     * every frame in the strip rather than one retriever per frame, since re-opening the
+     * source file per tile is the expensive part, not the individual frame decode.
+     *
+     * Each entry is independently nullable -- one bad frame (a keyframe gap, a moment the
+     * decoder chokes on) doesn't take down the rest of the strip, since the caller can
+     * just show a plain tile in that one slot instead of failing the whole thumbnail.
+     */
+    suspend fun loadFilmstrip(
+        context: Context,
+        uri: Uri,
+        startMs: Long,
+        endMs: Long,
+        tileCount: Int
+    ): List<Bitmap?> = withContext(Dispatchers.IO) {
+        if (tileCount <= 0) return@withContext emptyList()
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(context, uri)
+            val span = (endMs - startMs).coerceAtLeast(0L)
+            (0 until tileCount).map { i ->
+                val fraction = (i + 0.5f) / tileCount
+                val atUs = (startMs + (span * fraction).toLong()).coerceAtLeast(0L) * 1000L
+                try {
+                    retriever.getFrameAtTime(atUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                } catch (e: Exception) {
+                    null
+                }
+            }
+        } catch (e: Exception) {
+            List(tileCount) { null }
+        } finally {
+            retriever.release()
+        }
+    }
 }
