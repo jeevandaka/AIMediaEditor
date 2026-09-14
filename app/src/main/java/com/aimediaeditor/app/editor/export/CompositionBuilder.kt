@@ -27,6 +27,7 @@ import androidx.media3.transformer.EditedMediaItemSequence
 import com.aimediaeditor.app.data.media.MediaType
 import com.aimediaeditor.app.editor.model.AudioTrack
 import com.aimediaeditor.app.editor.model.effectiveDurationMs
+import com.aimediaeditor.app.editor.model.effectiveEffects
 import com.aimediaeditor.app.editor.model.FilterType
 import com.aimediaeditor.app.editor.model.FocalPoint
 import com.aimediaeditor.app.editor.model.computeCropWindow

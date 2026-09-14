@@ -53,6 +53,7 @@ import com.aimediaeditor.app.editor.model.AspectRatio
 import com.aimediaeditor.app.editor.model.AudioTrack
 import com.aimediaeditor.app.editor.model.EditCommand
 import com.aimediaeditor.app.editor.model.FilterType
+import com.aimediaeditor.app.editor.model.effectiveEffects
 import com.aimediaeditor.app.editor.model.VideoClip
 import com.aimediaeditor.app.editor.model.TextOverlay
 import com.aimediaeditor.app.editor.model.clipStartOffsetMs
