@@ -24,10 +24,61 @@ data class ProjectState(
     val aspectRatio: AspectRatio = AspectRatio.RATIO_9_16,
     val clips: List<VideoClip> = emptyList(),
     val audioTracks: List<AudioTrack> = emptyList(),
-    val textOverlays: List<TextOverlay> = emptyList()
+    val textOverlays: List<TextOverlay> = emptyList(),
+    // Added this round (UX spec section 25, Tier 1): a fade-to-black transition sitting
+    // between one clip and whatever follows it. Its own list, not a field on VideoClip,
+    // matching how audio/text are modeled -- a transition is a project-timeline concept
+    // (it needs to know about TWO clips), not a property of one clip in isolation.
+    // Defaults to empty so every already-saved project decodes unchanged.
+    val transitions: List<ClipTransition> = emptyList()
 ) {
     /** Timeline length is driven by the video clips; audio/text ride on top of it. */
     val durationMs: Long get() = clips.sumOf { it.durationMs }
+}
+
+/**
+ * A transition sits AFTER [afterClipId] -- between that clip and whatever clip
+ * immediately follows it in [ProjectState.clips]' current order. A transition whose
+ * [afterClipId] names the LAST clip (nothing follows it) or a clip that no longer
+ * exists is meaningless and is filtered out by [ProjectState.effectiveTransitions]
+ * rather than crashing or rendering somewhere unintended.
+ */
+@Serializable
+data class ClipTransition(
+    val afterClipId: String,
+    val type: TransitionType = TransitionType.FADE_TO_BLACK,
+    val durationMs: Long = DEFAULT_TRANSITION_DURATION_MS
+)
+
+/**
+ * Only one type for now: a symmetric dip-to-black centred on the cut point, built from
+ * an alpha-ramped full-frame black overlay (see CompositionBuilder) -- the mechanism
+ * this app already has confirmed working end-to-end (the same alpha/anchor overlay
+ * machinery Phase 3's text overlay burn-in uses). A true cross-dissolve (two clips'
+ * video blended together, not faded through black) needs Media3's multi-sequence video
+ * compositor, which this app has no confirmed usage of yet -- left for later rather
+ * than guessed at blind.
+ */
+enum class TransitionType { FADE_TO_BLACK }
+
+const val DEFAULT_TRANSITION_DURATION_MS = 500L
+const val MIN_TRANSITION_DURATION_MS = 200L
+const val MAX_TRANSITION_DURATION_MS = 2000L
+
+/**
+ * The single place that decides which stored [ClipTransition]s are actually live --
+ * so CompositionBuilder (export/preview) and any future UI reading "does this clip
+ * have a transition after it" can never disagree. Filters out a transition whose
+ * [ClipTransition.afterClipId] no longer names an existing clip, or names the LAST
+ * clip (nothing follows it to transition into) -- both are possible after deleting or
+ * reordering clips, and both should just make the transition inert, not crash
+ * rendering or leave a stale toggle showing as active in the UI.
+ */
+fun ProjectState.effectiveTransitions(): List<ClipTransition> {
+    if (clips.size < 2 || transitions.isEmpty()) return emptyList()
+    val lastClipId = clips.last().id
+    val validClipIds = clips.mapTo(HashSet()) { it.id }
+    return transitions.filter { it.afterClipId in validClipIds && it.afterClipId != lastClipId }
 }
 
 enum class AspectRatio(val label: String) {

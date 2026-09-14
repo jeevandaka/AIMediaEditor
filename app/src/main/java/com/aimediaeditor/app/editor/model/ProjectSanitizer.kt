@@ -174,6 +174,28 @@ object ProjectSanitizer {
 
         is EditCommand.RemoveAudioTrack ->
             state.copy(audioTracks = state.audioTracks.filterNot { it.id == command.trackId })
+
+        is EditCommand.ToggleTransition -> {
+            val index = state.clips.indexOfFirst { it.id == command.afterClipId }
+            val hasNextClip = index != -1 && index < state.clips.lastIndex
+            if (!hasNextClip) {
+                state // nothing after this clip to transition into -- safe no-op
+            } else if (state.transitions.any { it.afterClipId == command.afterClipId }) {
+                state.copy(transitions = state.transitions.filterNot { it.afterClipId == command.afterClipId })
+            } else {
+                state.copy(transitions = state.transitions + ClipTransition(afterClipId = command.afterClipId))
+            }
+        }
+
+        is EditCommand.SetTransitionDuration -> state.copy(
+            transitions = state.transitions.map {
+                if (it.afterClipId == command.afterClipId) {
+                    it.copy(durationMs = command.durationMs.coerceIn(MIN_TRANSITION_DURATION_MS, MAX_TRANSITION_DURATION_MS))
+                } else {
+                    it
+                }
+            }
+        )
     }
 
     private fun ProjectState.mapClip(clipId: String, transform: (VideoClip) -> VideoClip): ProjectState =
@@ -196,7 +218,16 @@ object ProjectSanitizer {
             removeAt(index)
             addAll(index, listOf(first, second))
         }
-        return copy(clips = newClips)
+        // A transition attached to the ORIGINAL clip's boundary with whatever came
+        // after it belongs after the SECOND half now -- the piece actually adjacent to
+        // that original neighbour. Leaving it keyed to the original id (now the FIRST
+        // half) would silently move it to sit between the two new halves instead: a
+        // surprise fade-to-black in the middle of what the user just split, not where
+        // they had it before.
+        val newTransitions = transitions.map {
+            if (it.afterClipId == clipId) it.copy(afterClipId = second.id) else it
+        }
+        return copy(clips = newClips, transitions = newTransitions)
     }
 
     /**

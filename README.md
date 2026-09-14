@@ -4,7 +4,7 @@ Status: **manual editor + real Media3 export pipeline (device-verified) +
 project persistence/autosave (JVM-verified) + several real-device bug fixes
 + a draggable audio timeline + a timeline playhead and zoom + audio
 snapping + on-canvas text positioning + real audio waveforms + a
-reorderable multi-effect stack (below).** The
+reorderable multi-effect stack + fade-to-black transitions (below).** The
 AI layer (natural-language prompts, media search/indexing) is not built yet
 — everything below is the conventional editor spec section 9 requires to
 exist on its own, plus the non-destructive EDL/command core spec section 21
@@ -32,11 +32,14 @@ README.
 **Built against Tier 1 so far:** a visible timeline playhead and pinch-free
 zoom (+/- buttons), audio drag/trim snapping to clip edges, on-canvas
 direct manipulation for text position (drag the overlay on the preview
-itself), real per-file audio waveforms on the audio lane, and a
-reorderable multi-effect stack per clip — all covered under "What's
-actually here" below. Still missing from Tier 1: true drag-and-drop media
-placement (media is added by selecting then tapping "Add to Project," not
-dragged onto the timeline), and transitions (none exist).
+itself), real per-file audio waveforms on the audio lane, a reorderable
+multi-effect stack per clip, and fade-to-black transitions between clips —
+all covered under "What's actually here" below. Still missing from Tier 1:
+true drag-and-drop media placement (media is added by selecting then
+tapping "Add to Project," not dragged onto the timeline), and a true
+cross-dissolve transition (this round's transition fades through black
+rather than blending two clips' video together — see item 11 below for
+why).
 
 ## Bug fixes (reported from a real device)
 
@@ -370,6 +373,44 @@ stack without adding another touch surface to an area that's already
 produced two rounds of real gesture-conflict bugs (audio drag, video
 trim).
 
+**11. Fade-to-black transitions between clips (UX spec section 25, Tier
+1).** A tappable divider now sits between every pair of adjacent clips on
+the timeline row — tap it to add a transition at that cut, tap again to
+remove it. `ProjectState` gains its own `transitions: List<ClipTransition>`
+(not a field on `VideoClip` — a transition inherently involves TWO clips,
+so it's modeled like audio/text: its own top-level list, not squeezed onto
+one clip), each entry naming the clip it sits AFTER and a duration
+(500ms default). `ToggleEffect`'s add/remove-by-membership shape is reused
+here as `ToggleTransition` for the same reason: a transition is present or
+absent, not a value to overwrite. A new `ProjectState.effectiveTransitions()`
+extension (the same defensive-resolution pattern as `effectiveEffects()`
+above) filters out any transition whose clip was deleted or is now the
+LAST clip (nothing left to transition into) — both are reachable states
+after editing, and both should make the transition quietly inert rather
+than crash rendering or leave a stale toggle showing as active. Splitting
+a clip that has a transition after it needed one more fix: the transition
+is now re-attached to the SECOND half of the split, since that's the
+piece actually adjacent to the original next clip — without this, the
+transition would have silently relocated to sit between the two new
+halves instead of where the user had it.
+
+**The transition itself is a "dip to black," not a cross-dissolve.** A
+true cross-dissolve blends two clips' video together (both visible,
+opacity-crossfading) via Media3's multi-sequence video compositor, which
+this app has no confirmed usage of anywhere. Rather than guess at that
+API blind, this round reuses the ONE overlay mechanism already proven to
+work end-to-end on a real device — the same alpha/anchor `OverlayEffect`
+machinery Phase 3's text-overlay burn-in uses, just with a full-frame
+black rectangle (`CompositionBuilder.transitionOverlayTextures`, a new
+`BitmapOverlay` subclass, added to the SAME composition-level
+`OverlayEffect` the text overlays already ride on) instead of text, and a
+continuously-varying alpha (ramping 0→1→0, linear, peaking at exactly the
+cut point) instead of the binary on/off alpha text overlays use. Visually
+this is: the outgoing clip fades to black, then the incoming clip fades
+up from black — a real, named transition type in its own right (not a
+placeholder for cross-dissolve), just not the one most people picture
+first when they hear "transition."
+
 ## What's verified vs. not, this round
 
 The persistence work above is new, plain-Kotlin logic with no Media3/codec
@@ -509,6 +550,43 @@ this session. Needs an on-device check: apply two or more filters to one
 clip, confirm both the single-clip preview (video AND photo) and the
 final export show all of them stacked in the chosen order, then reorder
 them and confirm the visible result actually changes to match.
+
+Transitions have a genuine serialization surface (`ProjectState.transitions`)
+and genuine arithmetic (the alpha-ramp formula), and both were checked the
+way this project checks what it actually can from this sandbox.
+`ClipTransition` was round-tripped in the same standalone JVM project as
+every other `@Serializable` change this session, including a project
+saved *before* the field existed at all (no `transitions` key in the
+project object) — confirmed it decodes with `transitions` defaulting to
+`emptyList()` rather than crashing. The alpha-ramp formula itself (`alpha
+= 1 - abs(positionMs - boundaryMs) / halfWindowMs`, clamped to 0 outside
+the window) was hand-checked against its own boundary cases: exactly at
+the cut point (should be 1, fully black), exactly at either edge of the
+transition window (should be 0), and a quarter of the way through one
+side (should be 0.5) — all match the intended symmetric dip-to-black
+shape by direct substitution, the same lightweight-but-real check level
+`ProjectSanitizer`'s clamp math and `concatColorMatrices` above got.
+
+What that does NOT cover, and this is this round's biggest area of
+genuine uncertainty: whether `BitmapOverlay` — a new Media3 class for
+this app, never used before this round — actually renders a bitmap that
+covers the WHOLE output frame the way `transitionOverlayTextures`
+assumes. The text-overlay mechanism this reuses (alpha via
+`StaticOverlaySettings`, composited via `OverlayEffect`) is genuinely
+device-verified from Phase 3 — but that confirms the anchor-POINT
+positioning of a small overlay (text), not that a same-size-or-larger
+bitmap centred with no scale applied reliably fills the entire frame
+regardless of the export's actual resolution. The 1920×1080 bitmap size
+was chosen specifically to be at least as large as anything this app
+exports (720p or 1080p, see `ExportWorker`) so the overlay doesn't need
+`StaticOverlaySettings`' scale semantics to work correctly at all — but
+if the true pixel-to-frame mapping this Media3 version uses turns out to
+work differently than assumed, the visible failure mode would be a black
+rectangle that doesn't fully cover the frame during a transition (a
+partial or off-center dip to black), not a crash. Needs an on-device
+check before this is trusted: trigger a transition between two clips and
+confirm the ENTIRE visible frame goes black at the cut point, edge to
+edge, not just a portion of it.
 
 ## What's not here yet
 
@@ -676,6 +754,18 @@ be parsed into once the prompt UI is built. When that's wired up:
   Reordering is up/down buttons, not drag (deliberate, see "What's
   actually here" item 10), which is more taps for a stack of more than a
   couple of filters.
+- Transitions are fade-to-black only, not a true cross-dissolve (see item
+  11 in "What's actually here" for why), fixed at one type
+  (`TransitionType.FADE_TO_BLACK` is the only entry in the enum), and the
+  timeline toggle only ever adds one at the default 500ms duration — the
+  `SetTransitionDuration` command exists in the taxonomy but has no manual
+  UI control yet (a short/medium/long preset row, matching the pattern
+  the speed/volume chips already use, is the natural next step). A
+  transition also can't be shorter than either of its two neighbouring
+  clips are long, in the sense that nothing currently prevents setting a
+  transition duration longer than a very short adjacent clip's own
+  length, which would make the dip-to-black window extend into or past
+  that clip's trim boundaries — not yet guarded against.
 - Single module, no DI framework.
 - No automated test suite wired into the Gradle build itself
   (`app/src/test`) despite `editor/model/` and `data/project/` being pure,
@@ -784,6 +874,20 @@ Manual, on a real device (no SDK in this sandbox to run instrumented tests):
     reverse/reapply correctly. Export → confirm the exported video shows
     all applied filters stacked in the same order shown in the editor, for
     both a video clip and a photo.
+9o. With at least two clips on the timeline, tap the small divider between
+    them → confirm it turns highlighted/filled (active state). Play
+    through that point (either "Play Timeline" or export the project) →
+    confirm the WHOLE frame edge-to-edge dips to black right at the cut,
+    not a partial rectangle or an off-center patch (this is the specific
+    thing "What's verified vs. not" flags as unconfirmed — the whole
+    point of this test case). Tap the same divider again → confirm it
+    returns to its inactive state and the cut plays as a plain hard cut
+    again, no residual black flash. Split a clip that has an active
+    transition after it → confirm the transition still plays between the
+    (now-second-half-of-the-split) clip and its original next neighbour,
+    not in the middle of the two new halves. Delete the clip a transition
+    is attached to → confirm nothing crashes and the divider before the
+    deleted clip's old position no longer shows as active.
 10. Create a project, make an edit, background the app (Home button) without
     exporting, then kill the app from Recents → relaunch → open it from
     Home's "Projects" row or the Projects screen → confirm the edit is still

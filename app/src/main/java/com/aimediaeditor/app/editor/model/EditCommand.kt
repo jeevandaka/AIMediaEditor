@@ -60,4 +60,16 @@ sealed interface EditCommand {
     // that came after it too.
     data class RemoveTextOverlay(val overlayId: String) : EditCommand
     data class RemoveAudioTrack(val trackId: String) : EditCommand
+    // Added this round (UX spec section 25, Tier 1): adds a fade-to-black transition
+    // after the named clip if none exists there yet, removes it if one does -- same
+    // toggle shape as ToggleEffect above, and for the same reason (a transition, like a
+    // stacked filter, is inherently a membership thing: present or not, not a value to
+    // overwrite). A no-op if the named clip has nothing after it to transition into --
+    // see ProjectSanitizer and ProjectState.effectiveTransitions.
+    data class ToggleTransition(val afterClipId: String) : EditCommand
+    // Not yet wired to any manual UI control this round (the timeline's transition
+    // toggle only ever adds one at the default duration) -- kept in the taxonomy for
+    // the AI layer and a future duration UI to target, same as ApplyFilter's unused
+    // whole-project case was before it got replaced.
+    data class SetTransitionDuration(val afterClipId: String, val durationMs: Long) : EditCommand
 }

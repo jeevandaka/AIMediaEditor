@@ -57,6 +57,8 @@ import com.aimediaeditor.app.editor.model.effectiveEffects
 import com.aimediaeditor.app.editor.model.VideoClip
 import com.aimediaeditor.app.editor.model.TextOverlay
 import com.aimediaeditor.app.editor.model.clipStartOffsetMs
+import com.aimediaeditor.app.editor.model.effectiveEffects
+import com.aimediaeditor.app.editor.model.effectiveTransitions
 import com.aimediaeditor.app.editor.model.ratio
 import java.util.UUID
 
@@ -121,6 +123,14 @@ fun EditorScreen(
             val clipEnd = clipStart + clip.durationMs
             uiState.project.textOverlays.filter { it.startMs < clipEnd && it.endMs > clipStart }
         }
+    }
+
+    // Which clip ids currently have a LIVE transition after them -- drives which
+    // TimelineStrip toggle renders as active. Goes through effectiveTransitions(), not
+    // the raw list, so a transition orphaned by a delete/reorder never shows as active
+    // in the UI even if it's still sitting in project.transitions (see ProjectState).
+    val transitionsAfterClipIds = remember(uiState.project.transitions, uiState.project.clips) {
+        uiState.project.effectiveTransitions().mapTo(mutableSetOf()) { it.afterClipId }
     }
 
     LaunchedEffect(selectedClip?.id, previewMode) {
@@ -351,7 +361,9 @@ fun EditorScreen(
                 modifier = Modifier.fillMaxWidth(),
                 pixelsPerSecond = pixelsPerSecond,
                 scrollState = timelineScrollState,
-                playheadMs = if (previewMode == PreviewMode.TIMELINE) timelinePositionMs else null
+                playheadMs = if (previewMode == PreviewMode.TIMELINE) timelinePositionMs else null,
+                transitionsAfterClipIds = transitionsAfterClipIds,
+                onToggleTransition = { afterClipId -> viewModel.onCommand(EditCommand.ToggleTransition(afterClipId)) }
             )
 
             // Drag a track left/right to reposition it, drag its right edge to trim
