@@ -479,6 +479,25 @@ hardening pass is meant to catch: brace/paren balance alone, this
 project's only prior sanity check with no compiler available, cannot
 catch a missing import).
 
+**3. Two more pure-Kotlin files got the same treatment, on a follow-up
+"continue."** `CropMath.kt` (off-center crop/reframe geometry) carries the
+exact same "hand-traced against edge cases... verified against a
+throwaway Python port, never actually executed as Kotlin" history as
+`ProjectSanitizer` did, and `ProjectHistory.kt` (undo/redo, spec section
+27) had been manually tested on-device since Phase 2 but never covered by
+any script or suite. Both were mirrored into the standalone JVM harness
+first (15 more checks: `computeCropWindow`/`toNdcCrop` across multiple
+source/target/focal-point combinations including edge-pinned focal
+points and degenerate zero/negative aspect ratios; `ProjectHistory`
+across single-step and multi-step undo/redo, the no-op-isn't-recorded
+case, and the fresh-edit-clears-redo case), all passing, then ported as
+`CropMathTest` and `ProjectHistoryTest` alongside the first two test
+classes. `app/src/test/java/.../editor/model/` now has four test classes
+covering everything in that package except `TimelinePositions.kt`
+(trivial enough — one function, already exercised indirectly through the
+transition tests above — that a dedicated suite wasn't judged worth
+adding this round).
+
 ## What's verified vs. not, this round
 
 The persistence work above is new, plain-Kotlin logic with no Media3/codec
@@ -711,7 +730,9 @@ AIMediaEditor/
                                 PendingExportHolder}.kt
     └── src/test/java/com/aimediaeditor/app/editor/model/
         ├── ProjectStateSerializationTest.kt
-        └── ProjectSanitizerTest.kt
+        ├── ProjectSanitizerTest.kt
+        ├── CropMathTest.kt
+        └── ProjectHistoryTest.kt
 ```
 
 Single Gradle module. Split into the `core-*`/`feature-*` layout from spec
@@ -857,11 +878,13 @@ be parsed into once the prompt UI is built. When that's wired up:
   round's hardening scope.
 - Single module, no DI framework.
 - `app/src/test` now exists (see "Hardening pass" below) but only covers
-  `editor/model/` — the two files that are pure, portable Kotlin, the same
-  scope every standalone JVM verification script this project has used all
-  along was already limited to. Everything Android-touching (`data/media/`,
-  `data/project/`, all of `ui/`, `editor/export/`) still has zero automated
-  coverage; only `./gradlew test` (JVM unit tests) is wired up, not
+  `editor/model/` — the pure, portable Kotlin files, the same scope every
+  standalone JVM verification script this project has used all along was
+  already limited to (four test classes now: serialization,
+  `ProjectSanitizer`, `CropMath`, `ProjectHistory`). Everything
+  Android-touching (`data/media/`, `data/project/`, all of `ui/`,
+  `editor/export/`) still has zero automated coverage; only
+  `./gradlew test` (JVM unit tests) is wired up, not
   `./gradlew connectedAndroidTest` (instrumented, needs a device/emulator)
   — this sandbox can run neither, so even the new suite is unexecuted here,
   same caveat as everything else Android-specific in this project.
