@@ -3,6 +3,9 @@ package com.aimediaeditor.app.ui.home
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import com.aimediaeditor.app.data.index.MediaIndexWorker
 import com.aimediaeditor.app.data.media.MediaItem
 import com.aimediaeditor.app.data.media.MediaRepository
 import com.aimediaeditor.app.data.project.ProjectRepository
@@ -37,6 +40,15 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             val items = repository.loadAllMedia()
             _uiState.value = HomeUiState.Loaded(items)
         }
+        // Kicked off alongside the plain media load, not blocking it -- the grid shows
+        // real media immediately regardless of indexing progress; search results only
+        // improve as this catches up. WorkManager's default de-duplication (same
+        // work name, KEEP policy would be needed to fully dedupe repeats, but a plain
+        // enqueue here is harmless since indexPendingMedia is itself incremental --
+        // a second run while the first is still in flight just re-scans, at worst
+        // wasting one redundant pass, never corrupting the index).
+        WorkManager.getInstance(getApplication())
+            .enqueue(OneTimeWorkRequestBuilder<MediaIndexWorker>().build())
     }
 
     fun onPermissionDenied() {

@@ -1,4 +1,4 @@
-# AI Media Editor — Phase 1–4: media browser, manual editor, real export, persistence, first AI slice
+# AI Media Editor — Phase 1–5: media browser, manual editor, real export, persistence, AI edit layer, media indexing/search
 
 Status: **manual editor + real Media3 export pipeline (device-verified) +
 project persistence/autosave (JVM-verified) + several real-device bug fixes
@@ -7,15 +7,22 @@ snapping + on-canvas text positioning + real audio waveforms + a
 reorderable multi-effect stack + a checked-in JUnit test suite + a first
 slice of the AI layer (natural-language prompt → `EditCommand`s, via the
 Anthropic API — see "AI layer (Phase 4)" below, entirely unverified
-against the live API from this sandbox).** Fade-to-black transitions
-between clips have a working timeline toggle and data model but
-currently render nothing — a real-device test outside this sandbox found
-the rendering approach broken and reverted it directly against this
-repository (see item 11 under "What's actually here"). Still missing:
-media search/indexing (spec sections 5–6), any AI photo tools, working
-transition rendering, and a real device pass on the AI layer. See "What's
-not here yet" for exactly what's missing, and "What's verified vs. not"
-for which parts of the last few rounds have actually been run.
+against the live API from this sandbox) + on-device media indexing and
+deterministic natural-language search (Room + ML Kit + EXIF/GPS, see
+"Media indexing/search (Phase 5, stage 1)" below — this is stage 1 of the
+user's own stated chain "Media indexing/search → AI library selection →
+AI first-cut assembly → polished killer workflow"; stages 2–4 are not
+started).** Fade-to-black transitions between clips have a working
+timeline toggle and data model but currently render nothing — a
+real-device test outside this sandbox found the rendering approach broken
+and reverted it directly against this repository (see item 11 under
+"What's actually here"). Still missing: LLM-based ("Stage 2") query
+understanding for search, any AI photo tools, working transition
+rendering, and a real device pass on the AI layer AND the new indexing/
+search code (entirely unverified from this sandbox — first-ever Room and
+ML Kit usage in this project). See "What's not here yet" for exactly
+what's missing, and "What's verified vs. not" for which parts of the last
+few rounds have actually been run.
 
 ## Adopting the "World-Class Video Editor" UX spec
 
@@ -602,6 +609,64 @@ never need to know about each other" property is the entire reason
 `EditCommand`/`ProjectSanitizer` were built as a closed taxonomy back in
 Phase 2, before any AI code existed.
 
+## Media indexing/search (Phase 5, stage 1)
+
+The user's own directed build order for the rest of this project is:
+**"Media indexing/search → AI library selection → AI first-cut assembly →
+polished killer workflow."** This round is stage 1 only — everything below
+is deterministic (no LLM involved); natural-language query *understanding*
+via an LLM is deliberately deferred to stage 2, so this round doesn't blur
+a boundary the user explicitly drew.
+
+**1. `data/index/MediaAnalyzer.kt`** — the per-item analysis pipeline, run
+once per media item the first time it's indexed: `ImageLabeling` (ML Kit,
+on-device, object/scene labels), `FaceDetection` (ML Kit, on-device,
+presence/count only — no identity, no recognition), GPS extraction
+(`ExifInterface` for photos, `MediaMetadataRetriever.METADATA_KEY_LOCATION`
+for videos) reverse-geocoded to a locality name via `Geocoder`, and a
+crude quality heuristic (resolution + label count — explicitly NOT a real
+aesthetic/blur model, see "Known limitations"). Every field degrades
+independently on failure (a video with no GPS still gets labels; a label
+call that throws still leaves face/GPS data intact) rather than the whole
+item's indexing failing as one unit.
+
+**2. `data/index/{MediaIndexEntity, MediaIndexDao, AppDatabase}.kt`** — a
+Room database (first use of Room in this project) storing the analysis
+results: one row per media item (`MediaIndexEntity`) plus a separate
+one-row-per-label table (`MediaLabelEntity`) for the many-labels-per-item
+relationship. `replaceMediaWithLabels` is a `@Transaction` default method
+so a re-index of one item can't leave stale labels alongside new ones.
+
+**3. `data/index/MediaSearchQuery.kt`** — the actual matching logic, and
+deliberately the ONE piece of this round with zero Android dependency (no
+Room, no ML Kit, no `Context`) so it could be genuinely JVM-verified (see
+below) the same way `ProjectState`/`EditCommand` were. Parses a free-text
+query into a `SearchFilter` (media type, orientation, face-requirement,
+a "best"/quality sort signal, and relative or absolute date phrases —
+"last week," "in March," "from 2023" — including month-name resolution
+with year-rollback when the named month is later than the current month)
+via keyword/stopword matching, then filters and sorts a list of
+`IndexedMediaSummary` against it. This is the layer spec section 5's
+example queries ("Find pictures from Goa," "Find my best portrait
+photos") are actually answered by right now — Stage 1, not an LLM.
+
+**4. `data/index/MediaIndexRepository.kt` + `MediaIndexWorker.kt`** — the
+bridge from Room rows to `IndexedMediaSummary`/back to `MediaItem`, and a
+plain `CoroutineWorker` (no foreground notification, unlike
+`ExportWorker` — indexing isn't something the user is actively waiting
+on) that runs `indexPendingMedia` once per app permission-grant.
+`indexPendingMedia` is itself incremental (skips already-indexed ids), so
+re-running it on every launch is cheap once the library's fully indexed.
+
+**5. UI** (`ui/search/{MediaSearchScreen, MediaSearchViewModel}.kt`) — a
+new search entry point from Home's top bar (`onOpenSearch`), a text field
++ Search button, and a simplified always-selectable results grid (unlike
+Home's own grid, there's no separate "enter selection mode" step — every
+tap toggles selection directly). Selecting results and tapping "Add to
+Project" hands off to the exact same `EDITOR_NEW` route Home's own
+selection flow uses, so nothing downstream needs to know results came
+from a search instead of the plain grid.
+
 ## What's verified vs. not, this round
 
 The persistence work above is new, plain-Kotlin logic with no Media3/codec
@@ -841,6 +906,66 @@ doesn't crash), confirm the response gets parsed and applied correctly,
 and confirm a deliberately bad key produces a clear error message rather
 than a silent failure or crash.
 
+**Media indexing/search has the same "pure logic verified, Android glue
+entirely unverified" split as everything else in this project — and this
+round introduces two brand-new dependencies (Room, ML Kit) this project
+has never used before.**
+
+Genuinely verified: `MediaSearchQuery`/`IndexedMediaSummary` (zero Android
+dependency) was copied into the same standalone Kotlin/JVM harness every
+other pure-logic change this project has made gets checked in, and run
+against 13 cases — media-type filtering, orientation filtering, the
+face-requirement word list, quality-sort ordering, and every supported
+date-phrase form (a relative phrase, an absolute month+year, a bare year,
+and the year-rollback case for a named month later than the current one).
+All 13 passed, but only after catching one real bug this way, not by
+static reading: `FACE_WORDS` originally included "portrait"/"portraits,"
+so a query like "my best portrait photos" wrongly required BOTH portrait
+orientation AND a detected face — a portrait-oriented photo with no
+face in it was incorrectly excluded. Fixed by separating "portrait
+orientation" from "a portrait of a person" (removed from `FACE_WORDS`,
+kept in the literal-keyword exclusion list so it still doesn't leak into
+search terms), re-ran the harness, all 13 passed. The same 13 checks are
+also ported to a checked-in `MediaSearchQueryTest.kt` against the real
+production class, same discipline as `ProjectStateSerializationTest` and
+the AI-layer test suite.
+
+Completely UNVERIFIED, with no way to narrow it down further from this
+sandbox: `MediaAnalyzer`'s entire pipeline — this is the first time this
+project has ever called ML Kit (`ImageLabeling`, `FaceDetection`) or
+`ExifInterface`, and none of it has run even once. Whether ML Kit's
+on-device model downloads/initializes correctly on first use, whether the
+`Task<T>`→coroutine bridge (`suspendCancellableCoroutine`, hand-written —
+no `kotlinx-coroutines-play-services` dependency was added) actually
+resolves and cancels correctly, whether GPS EXIF data reads correctly now
+that `ACCESS_MEDIA_LOCATION` is declared (added this round — API 29+
+redacts GPS EXIF without it, a real gap the manifest had until now), and
+whether `Geocoder.getFromLocation()` (the deprecated synchronous form,
+used deliberately since this already runs off the main thread inside a
+`WorkManager` coroutine) returns usable results on a real device — none
+of this can be exercised here. Room itself (`AppDatabase`, `MediaIndexDao`,
+the generated KSP code) is equally unrun; the DAO methods and the
+`@Transaction` `replaceMediaWithLabels` method are written against Room's
+documented contract, not confirmed against a compiled, running database.
+
+**The single highest build-risk item in this round is not a library
+version, it's the KSP plugin version pin** (`2.3.20-1.0.29` in
+`libs.versions.toml`) — Room's annotation processor requires KSP, and KSP
+releases are versioned against a specific Kotlin compiler version; a
+mismatch here fails Gradle sync itself, before the app even attempts to
+compile, unlike an ordinary dependency version conflict. Confirm this
+resolves cleanly before trusting anything else in this section.
+
+Needs an on-device check before any of this is trusted: grant media
+permission on a device with a real, mixed-content photo/video library,
+confirm indexing completes without crashing or hanging (watch for it via
+`adb logcat`, since there's no UI progress indicator for background
+indexing), then try several of spec section 5's example-style queries
+("photos from Goa," "my best portrait photos," "videos of people,"
+"photos from last week") from the new Search screen and confirm the
+results are plausible — not perfect (label/GPS/face detection are all
+best-effort ML/heuristic layers), but plausible.
+
 ## What's not here yet
 
 - **AI prompt interface, beyond the first slice below** (spec sections
@@ -850,12 +975,17 @@ than a silent failure or crash.
   before commands apply (they apply immediately, same as a manual edit,
   reversible only via Undo), voice input, and anything resembling a
   guided/suggested-prompts UI.
-- **Media indexing / natural-language search** (spec section 5–6): no
-  object/scene/face detection, no embeddings, no local search index.
-  `MediaRepository` does a flat `MediaStore` query. The AI layer can only
-  reference media already placed in the project (see `EditCommandParser`'s
-  deliberate exclusion of `AddAudio`) — it cannot browse or search the
-  device's media library on the user's behalf.
+- **LLM-based ("Stage 2") natural-language query understanding** (spec
+  section 5–6): the deterministic Stage 1 matching described in "Media
+  indexing/search (Phase 5, stage 1)" above now exists (object/scene
+  labels, face presence, GPS→locality, date phrases, a quality-sort
+  signal) — still missing: an LLM actually parsing a free-form query
+  (vs. keyword/date-phrase matching), embeddings/semantic search, and any
+  form of "AI library selection" (the AI layer still can only reference
+  media already placed in the project — see `EditCommandParser`'s
+  deliberate exclusion of `AddAudio` — it cannot browse or select from the
+  device's library on the user's behalf; that's the next stage in the
+  user's own stated chain, not started).
 - **Photo editor** (spec section 10) beyond a still image as a timeline
   clip: no crop/brightness/filters screen for a single photo.
 - **AI photo features** (background removal, smart crop as a standalone
@@ -892,10 +1022,14 @@ AIMediaEditor/
             │              ClipPreview, AudioTrackStrip, AddTextDialog,
             │              AddAudioDialog}.kt
             ├── ui/projects/{ProjectsScreen, ProjectsViewModel}.kt
+            ├── ui/search/{MediaSearchScreen, MediaSearchViewModel}.kt
             ├── data/media/{MediaItem, MediaRepository, AudioRepository,
             │               VideoThumbnailLoader, AudioWaveformLoader}.kt
             ├── data/project/{ProjectRecord, ProjectRepository}.kt
             ├── data/settings/ApiKeyStore.kt
+            ├── data/index/{MediaSearchQuery, MediaIndexEntity, MediaIndexDao,
+            │               AppDatabase, MediaAnalyzer, MediaIndexRepository,
+            │               MediaIndexWorker}.kt
             ├── ai/{EditCommandToolSchema, EditCommandParser,
             │       ClaudeEditService}.kt
             ├── editor/{EditorViewModel, MediaMapping}.kt
@@ -906,8 +1040,9 @@ AIMediaEditor/
     └── src/test/java/com/aimediaeditor/app/
         ├── editor/model/{ProjectStateSerializationTest, ProjectSanitizerTest,
         │                 CropMathTest, ProjectHistoryTest}.kt
-        └── ai/{EditCommandParserTest, EditCommandToolSchemaTest,
-                ClaudeEditServiceTest}.kt
+        ├── ai/{EditCommandParserTest, EditCommandToolSchemaTest,
+        │       ClaudeEditServiceTest}.kt
+        └── data/index/MediaSearchQueryTest.kt
 ```
 
 Single Gradle module. Split into the `core-*`/`feature-*` layout from spec
@@ -929,6 +1064,11 @@ module boundary earns its build-time cost.
 | kotlinx-serialization-json | 1.9.0 | Project (de)serialization for autosave; the Kotlin plugin variant is pinned to the Kotlin version above (guaranteed matching, not a guess) |
 | JUnit4 | 4.13.2 | `app/src/test` unit test suite (see "Hardening pass") |
 | AndroidX Security Crypto | 1.1.0 | `EncryptedSharedPreferences`-backed storage for the user's own Anthropic API key (`ApiKeyStore`) — chosen over hand-rolled `Cipher`/`Keystore` wiring for the same reason as everywhere else in this project: a well-known first-party library is a smaller risk than rolling your own crypto |
+| AndroidX Room (runtime, ktx, compiler) | 2.7.1 | The local media index (`data/index/`) — explicitly named by spec section 16, not a discretionary choice; first use of Room in this project, entirely unverified from this sandbox (no Android SDK to compile/run the generated code against) |
+| KSP (`com.google.devtools.ksp`) | 2.3.20-1.0.29 | Room's annotation processor. **Highest build-risk item this round**: KSP releases are versioned against a specific Kotlin compiler version, and this pin must exactly match the Kotlin version above or Gradle sync itself fails, before the app even attempts to compile |
+| AndroidX ExifInterface | 1.3.7 | Reads GPS EXIF data from photos for `MediaAnalyzer`'s locality extraction (paired with `ACCESS_MEDIA_LOCATION`, newly declared this round) |
+| ML Kit Image Labeling | 17.0.9 | On-device object/scene labels for search (`MediaAnalyzer`) — first ML Kit usage in this project, entirely unverified from this sandbox |
+| ML Kit Face Detection | 16.1.7 | On-device face presence/count for search's "photos of people" style queries — presence/count only, no identity or recognition |
 | compileSdk / targetSdk / minSdk | 37 / 36 / 26 | targetSdk pinned one level back of compileSdk so Android 17's forced behavior changes don't land before they're deliberately handled |
 
 ## Build instructions
@@ -1083,6 +1223,31 @@ described below.
   response comes back.
 - Not verified: performance on low-RAM devices, 4K sources, thermal
   throttling during export, HDR tone-mapping.
+- Media indexing/search (see its own section above) has no LLM-based query
+  understanding yet — matching is keyword/date-phrase based (Stage 1
+  only), so a query phrased very differently from the recognized patterns
+  ("something scenic from when I was in Portugal" vs. "photos from
+  Portugal") won't match as well as an LLM-parsed query eventually would.
+  The quality score is a crude resolution + label-count heuristic, not a
+  real aesthetic/blur/composition model — "best" sorting is a rough proxy,
+  not a genuine quality judgment. Indexing runs once per app
+  permission-grant (`HomeViewModel.onPermissionGranted`), not on a
+  new-media-added event — newly added photos/videos won't appear in
+  search results until the next time the permission-grant path runs
+  (effectively, the next cold start after granting), and there's no
+  periodic background re-index trigger. There's no UI progress indicator
+  for indexing at all — it runs silently in the background (deliberate,
+  see the section above), so a user has no way to tell from the app
+  itself whether indexing has finished. Search re-reads and re-scores
+  every indexed row on every query (no persisted search index/cache) —
+  fine at a personal-library scale, would need to change well before a
+  multi-thousand-item library. Face/object/scene detection and locality
+  lookup are all best-effort ML/heuristic layers, not guaranteed-accurate
+  — a query like "videos of people" can miss a face ML Kit didn't detect,
+  or a locality name can be wrong/missing if reverse geocoding fails or
+  the device has no network for it (`Geocoder` on most devices needs
+  connectivity; a fully offline device may index photos with GPS
+  coordinates but no locality name at all).
 
 ## Testing instructions
 
@@ -1232,6 +1397,38 @@ Manual, on a real device (no SDK in this sandbox to run instrumented tests):
      or an infinite loading spinner). Turn on airplane mode and try a
      prompt with a valid key → confirm a network-failure message shows
      rather than a hang.
+14a. Fresh install, grant media permission on a device with a real, mixed
+     photo/video library (some with GPS data, some with people in them,
+     some without) → watch `adb logcat` briefly to confirm the indexing
+     worker runs and completes without crashing or throwing (there's no
+     UI indicator for it — this is the only way to observe it directly).
+     Confirm the app itself stays responsive (Home's grid, the editor)
+     while indexing runs in the background.
+14b. From Home, tap "Search" → confirm the search screen opens with the
+     example-query hint text visible, and typing then tapping "Search"
+     with no matches (query for something absent from the library) shows
+     the "no matches" message rather than a crash or blank screen.
+14c. Try each supported query pattern from spec section 5's own examples,
+     adapted to whatever's actually in your test library: a plain keyword
+     ("videos"), a face/people query ("photos of people" / "selfies"), a
+     "best" quality query ("my best photos"), an orientation query
+     ("portrait photos"), and at least one date phrase (a relative one
+     like "last week" and an absolute one like a month name or bare year)
+     → confirm results plausibly match in each case, and that a photo
+     used for the orientation-only query above is NOT also required to
+     contain a detected face (the portrait/face-word bug this round's JVM
+     harness caught — see "What's verified vs. not").
+14d. Select several results in the grid (tap to toggle, no long-press
+     needed) → confirm the "Add to Project" FAB shows the correct count,
+     and tapping it opens the editor with exactly those items on the
+     timeline, indistinguishable from selecting the same items on Home's
+     own grid.
+14e. Add a brand-new photo to the device (e.g. `adb push` a file into
+     `/sdcard/Pictures/`) after indexing has already completed once →
+     search for it immediately → confirm it does NOT yet appear (known
+     limitation: indexing only re-runs on the next permission-grant path,
+     not on new media). Force-stop and relaunch the app → search again →
+     confirm it now appears.
 
 ## Why it stops here
 
