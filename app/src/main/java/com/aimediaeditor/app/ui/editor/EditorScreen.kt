@@ -17,6 +17,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -35,8 +36,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.aimediaeditor.app.data.settings.ApiKeyStore
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -199,7 +202,18 @@ fun EditorScreen(
     var showTextDialog by remember { mutableStateOf(false) }
     var showAudioDialog by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
+    var showApiKeyDialog by remember { mutableStateOf(false) }
     var selectedAudioTrackId by remember { mutableStateOf<String?>(null) }
+
+    // EncryptedSharedPreferences.create() does real (small, but synchronous) file/
+    // Keystore I/O -- created once per screen via `remember`, not per recomposition,
+    // to keep that cost to a single hit rather than paying it repeatedly. hasApiKey is
+    // its own separate state (not read fresh from the store on every recomposition)
+    // since the store itself isn't Compose-observable -- bumped explicitly whenever the
+    // settings dialog actually changes the stored key, so the UI reflects a save/clear
+    // immediately without needing a full reactive wrapper around EncryptedSharedPreferences.
+    val apiKeyStore = remember { ApiKeyStore(context) }
+    var hasApiKey by remember { mutableStateOf(apiKeyStore.hasKey()) }
 
     // Timeline zoom: both lanes take this as their pixelsPerSecond, so zooming affects
     // clips and audio blocks identically -- a given clip never looks a different length
@@ -393,7 +407,37 @@ fun EditorScreen(
                     onAudioLooping = { id, loop -> viewModel.onCommand(EditCommand.SetAudioLooping(id, loop)) }
                 )
             }
+
+            AiPromptBar(
+                isLoading = uiState.isAiLoading,
+                hasApiKey = hasApiKey,
+                assistantMessage = uiState.aiMessage,
+                errorMessage = uiState.aiError,
+                onOpenSettings = { showApiKeyDialog = true },
+                onSubmit = { prompt ->
+                    val key = apiKeyStore.getKey()
+                    if (key != null) viewModel.submitAiPrompt(key, prompt)
+                },
+                onDismissFeedback = viewModel::clearAiFeedback
+            )
         }
+    }
+
+    if (showApiKeyDialog) {
+        ApiKeySettingsDialog(
+            hasExistingKey = hasApiKey,
+            onDismiss = { showApiKeyDialog = false },
+            onSave = { key ->
+                apiKeyStore.setKey(key)
+                hasApiKey = true
+                showApiKeyDialog = false
+            },
+            onClear = {
+                apiKeyStore.clearKey()
+                hasApiKey = false
+                showApiKeyDialog = false
+            }
+        )
     }
 
     if (showTextDialog) {
@@ -442,6 +486,120 @@ private fun RenameProjectDialog(currentName: String, onDismiss: () -> Unit, onCo
         text = { OutlinedTextField(value = text, onValueChange = { text = it }, singleLine = true) },
         confirmButton = { TextButton(onClick = { onConfirm(text) }, enabled = text.isNotBlank()) { Text("Save") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
+}
+
+/**
+ * The AI layer's entire user-facing surface (architecture notes section 7): a prompt
+ * field, a send button, and whatever the last request's outcome was. Deliberately no
+ * chat history/thread -- each request is independent, working from whatever the
+ * PROJECT looks like right now (including the result of the previous AI edit, since
+ * that already lives in [ProjectState] by the time the next prompt goes out), not from
+ * a remembered conversation.
+ */
+@Composable
+private fun AiPromptBar(
+    isLoading: Boolean,
+    hasApiKey: Boolean,
+    assistantMessage: String?,
+    errorMessage: String?,
+    onOpenSettings: () -> Unit,
+    onSubmit: (String) -> Unit,
+    onDismissFeedback: () -> Unit
+) {
+    var prompt by remember { mutableStateOf("") }
+    Column(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            OutlinedTextField(
+                value = prompt,
+                onValueChange = { prompt = it },
+                modifier = Modifier.weight(1f),
+                placeholder = { Text("Describe an edit, e.g. \"make it black and white\"") },
+                singleLine = true,
+                enabled = !isLoading
+            )
+            TextButton(onClick = onOpenSettings) { Text("Key") }
+            TextButton(
+                onClick = {
+                    onDismissFeedback()
+                    onSubmit(prompt)
+                    prompt = ""
+                },
+                enabled = !isLoading && hasApiKey && prompt.isNotBlank()
+            ) { Text("Send") }
+        }
+        if (!hasApiKey) {
+            Text(
+                "No API key set -- tap \"Key\" to add your own Anthropic API key.",
+                style = MaterialTheme.typography.labelSmall
+            )
+        }
+        if (isLoading) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+                CircularProgressIndicator(modifier = Modifier.size(16.dp))
+                Text("Thinking...", modifier = Modifier.padding(start = 8.dp), style = MaterialTheme.typography.labelSmall)
+            }
+        }
+        assistantMessage?.let {
+            Text(it, modifier = Modifier.padding(top = 4.dp), style = MaterialTheme.typography.bodySmall)
+        }
+        errorMessage?.let {
+            Text(
+                "Error: $it",
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(top = 4.dp),
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+    }
+}
+
+/**
+ * Never bundled into the APK, never sent anywhere except directly to Anthropic's own
+ * API from this device -- the README's stated plan for this since before any AI code
+ * existed. [androidx.security.crypto.EncryptedSharedPreferences] (via
+ * [com.aimediaeditor.app.data.settings.ApiKeyStore]) is what actually backs storage;
+ * this dialog is just the entry point for it.
+ */
+@Composable
+private fun ApiKeySettingsDialog(
+    hasExistingKey: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+    onClear: () -> Unit
+) {
+    var text by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Anthropic API key") },
+        text = {
+            Column {
+                Text(
+                    "Stored securely on this device only. Used directly by this app to call " +
+                        "Anthropic's API for AI edit requests -- never sent anywhere else.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    modifier = Modifier.padding(top = 8.dp),
+                    singleLine = true,
+                    placeholder = { Text(if (hasExistingKey) "•••• (already set)" else "sk-ant-...") },
+                    visualTransformation = PasswordVisualTransformation()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(text) }, enabled = text.isNotBlank()) { Text("Save") }
+        },
+        dismissButton = {
+            Row {
+                if (hasExistingKey) {
+                    TextButton(onClick = onClear) { Text("Clear") }
+                }
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        }
     )
 }
 

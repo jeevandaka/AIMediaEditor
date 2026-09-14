@@ -1,17 +1,17 @@
-# AI Media Editor — Phase 1–3: media browser, manual editor, real export, persistence
+# AI Media Editor — Phase 1–4: media browser, manual editor, real export, persistence, first AI slice
 
 Status: **manual editor + real Media3 export pipeline (device-verified) +
 project persistence/autosave (JVM-verified) + several real-device bug fixes
 + a draggable audio timeline + a timeline playhead and zoom + audio
 snapping + on-canvas text positioning + real audio waveforms + a
 reorderable multi-effect stack + fade-to-black transitions + a checked-in
-JUnit test suite for `editor/model/` (below).** The
-AI layer (natural-language prompts, media search/indexing) is not built yet
-— everything below is the conventional editor spec section 9 requires to
-exist on its own, plus the non-destructive EDL/command core spec section 21
-and the architecture notes require the AI layer to sit on top of later. See
-"What's not here yet" for exactly what's missing, and "What's verified vs.
-not" for which parts of the last few rounds have actually been run.
+JUnit test suite + a first slice of the AI layer (natural-language prompt
+→ `EditCommand`s, via the Anthropic API — see "AI layer (Phase 4)" below,
+entirely unverified against the live API from this sandbox).** Still
+missing: media search/indexing (spec sections 5–6), any AI photo tools,
+and a real device pass on anything in this round. See "What's not here
+yet" for exactly what's missing, and "What's verified vs. not" for which
+parts of the last few rounds have actually been run.
 
 ## Adopting the "World-Class Video Editor" UX spec
 
@@ -498,6 +498,81 @@ covering everything in that package except `TimelinePositions.kt`
 transition tests above — that a dedicated suite wasn't judged worth
 adding this round).
 
+## AI layer (Phase 4) — first slice
+
+Everything above this section is Phase 1–3: a real, hardened manual editor
+with no AI in it at all. This round is the first piece of Phase 4 — the
+layer spec sections 4–9/21 and architecture notes section 7 describe: an
+LLM that turns a typed prompt into `EditCommand`s, which then go through
+the exact same `ProjectSanitizer` validation gate every manual edit
+already does. The architectural promise this was always building toward
+("AI never executes anything directly, only ever produces a command from
+the closed taxonomy") is now real, not just a comment on `EditCommand.kt`
+describing a future state.
+
+**1. `EditCommandToolSchema` + `EditCommandParser`** (`ai/` package) — the
+translation layer between untrusted LLM output and the app's real command
+types, and the single highest-stakes new code this session added: a bug
+here means an AI edit silently does the wrong thing, with nothing on
+screen to make that obviously visible the way a broken gesture would be.
+`EditCommandToolSchema.toolDefinition()` builds the Anthropic Messages API
+"tool" definition — one JSON Schema `oneOf` branch per `EditCommand` case,
+by hand, kept in sync with `EditCommand.kt` with no compiler-enforced link
+between the two (hence the test coverage below). `EditCommand.AddAudio` is
+the one deliberate exclusion: it needs a real `content://` URI to a file
+already on the device, which the model has no way to know since it only
+ever sees the text project summary `describeProject()` builds, never the
+device's media library. Every other command operates on an id (a clip,
+text overlay, or audio track) the model CAN see in that summary.
+`EditCommandParser.parse()` reads Claude's tool-call JSON back into real
+`EditCommand`s — defensively, field by field: a missing field, a
+wrong-typed value, or an unrecognized enum/command name drops that ONE
+command silently rather than throwing or smuggling a garbage value into a
+constructed `EditCommand`. This is a stricter, earlier gate than
+`ProjectSanitizer`'s own "never trust the caller's numbers" contract —
+sanitizer can clamp an out-of-range timestamp, but it has no way to
+sanitize a `clipId` that was actually a JSON number in the model's
+response, so anything not even shaped right is rejected before
+`ProjectSanitizer` ever sees it.
+
+**2. `ClaudeEditService`** (`ai/` package) — the actual Anthropic Messages
+API call: `POST https://api.anthropic.com/v1/messages` via
+`java.net.HttpURLConnection` (a confirmed platform API, not a new HTTP
+client dependency — the same "prefer what's already confirmed over
+guessing at a new library" reasoning `AudioWaveformLoader` followed),
+`tool_choice` forced to the one `apply_edit_commands` tool so the response
+is always structured JSON, never free text to regex-parse. The request
+embeds `EditCommandToolSchema.describeProject()`'s summary of the CURRENT
+project (real clip/track/overlay ids, durations, current filters,
+existing transitions) alongside the user's own prompt, so the model has
+real ids to reference instead of inventing them.
+
+**3. `ApiKeyStore`** (`data/settings/`) — the user's own Anthropic API key,
+stored via `EncryptedSharedPreferences` (AndroidX Security Crypto, backed
+by the Android Keystore), entered through a settings dialog, never bundled
+into the APK and never sent anywhere except directly to `api.anthropic.com`
+from the device. No backend/proxy exists or is planned — each user brings
+and pays for their own key, which is also why this needed the app's first
+`android.permission.INTERNET` declaration (previously this app made no
+network calls of any kind).
+
+**4. UI** (`EditorScreen.kt`) — an `AiPromptBar` at the bottom of the
+editor: a text field, a "Key" button (opens `ApiKeySettingsDialog`), and a
+"Send" button. Deliberately no chat thread/history — each request works
+from whatever the project looks like right now (which already reflects
+the result of the previous AI edit, since that's just `ProjectState` by
+the time the next prompt goes out), not from a remembered conversation.
+`EditorViewModel.submitAiPrompt()` applies every returned command through
+the SAME `ProjectHistory.apply()` → `ProjectSanitizer` path a manual edit
+uses (one `syncFromHistory` call after all of one response's commands are
+applied, not one per command, so a multi-command AI edit doesn't flash
+through intermediate states on screen) — meaning undo/redo, autosave, and
+the export pipeline all already work on an AI-driven edit for free,
+without a single line of new code in any of them. That "the two layers
+never need to know about each other" property is the entire reason
+`EditCommand`/`ProjectSanitizer` were built as a closed taxonomy back in
+Phase 2, before any AI code existed.
+
 ## What's verified vs. not, this round
 
 The persistence work above is new, plain-Kotlin logic with no Media3/codec
@@ -675,15 +750,85 @@ check before this is trusted: trigger a transition between two clips and
 confirm the ENTIRE visible frame goes black at the cut point, edge to
 edge, not just a portion of it.
 
+**The AI layer has the widest verified/unverified split of anything in
+this project — read this before trusting any of it.**
+
+Genuinely verified, the same way everything else pure-Kotlin in this
+session has been: `EditCommandToolSchema` and `EditCommandParser`'s
+`kotlinx.serialization.json` DSL usage (`buildJsonObject`,
+`putJsonArray`, `putJsonObject`) was mirrored into the standalone JVM
+harness and ACTUALLY COMPILED — unlike Media3, this code's only real
+dependency comes from Maven Central, which this sandbox can reach, so
+this is a genuine compiler check, not a read-through. That compile pass
+caught a real bug on the first attempt: `JsonArrayBuilder.add()` only
+accepts a `JsonElement`, not a raw `String` — `add("type")` and similar
+calls failed to compile until wrapped in `JsonPrimitive(...)`, in both
+the harness and the real file. The parser itself was checked against a
+realistic multi-command tool-call response (round-trips to the exact
+expected `EditCommand` list), five separate adversarial malformed-input
+cases (a missing required field, a wrong-typed field, an unrecognized
+enum value, a hallucinated command name alongside the deliberately
+excluded `AddAudio`, a `commands` value that isn't even an array), and
+one pass exercising all 19 exposed command types through the parser at
+once — 9 checks, all passing, all ported to `EditCommandParserTest`/
+`EditCommandToolSchemaTest` against the real production classes.
+`ClaudeEditService`'s pure request/response logic (`buildRequestBody`,
+`parseSuccessResponse`, `describeError` — made `internal`, not `private`,
+specifically so `ClaudeEditServiceTest` can reach them) got the same
+treatment: 5 more checks, including one that caught a second real bug —
+`Json.parseToJsonElement` THROWS on text that isn't valid JSON syntax at
+all (not just a `some-other-shape` case an `as?` cast could reject
+gracefully), so the original `parseSuccessResponse`/`describeError` would
+have propagated an exception instead of returning `AiEditResult.Failure`
+for a non-JSON response body. Both now wrap the parse call in its own
+`try`/`catch`. 45 AI-layer checks total, all passing, all with a
+checked-in JUnit counterpart.
+
+Completely UNVERIFIED, with no way to narrow that down further from this
+sandbox: `ClaudeEditService.requestEdit()`'s actual `HttpURLConnection`
+call has never been exercised even once — this sandbox has no confirmed
+network path to `api.anthropic.com` (unlike Maven Central, which is
+reachable), and there's no device to run the app on either. The request/
+response SHAPE is written from the Messages API's publicly documented
+format, but "documented format" and "what the live API actually returns"
+are not the same claim. The `MODEL` constant (`claude-sonnet-5`) is
+similarly unconfirmed against the live API's current model list — check
+it before relying on this. `ApiKeyStore`'s `EncryptedSharedPreferences`
+usage is standard, well-documented AndroidX API, but — like every other
+Android-only class this session — has never actually run: not the key
+generation, not the encrypt/decrypt round-trip, not what happens on a
+device without a usable Keystore. The entire Compose UI (`AiPromptBar`,
+`ApiKeySettingsDialog`) is new, untested interaction code, same as every
+other UI addition this session. One thing this pass DID catch by simply
+re-reading the manifest rather than guessing: `AndroidManifest.xml` had
+no `android.permission.INTERNET` at all before this round (this app made
+zero network calls before now) — without it, the OS blocks outbound
+sockets at the platform level regardless of anything the app-level
+networking code does correctly. Added, but like everything else in this
+section, not device-confirmed.
+
+Needs an on-device check before any of this is trusted: enter a real API
+key, submit a simple prompt ("make this clip black and white"), confirm
+the request actually reaches Anthropic's API (not just that the app
+doesn't crash), confirm the response gets parsed and applied correctly,
+and confirm a deliberately bad key produces a clear error message rather
+than a silent failure or crash.
+
 ## What's not here yet
 
-- **AI prompt interface** (spec sections 4–9, 21): no "Ask AI" screen, no
-  LLM call, no structured edit-plan generation. `EditCommand` is the target
-  shape for that output, but nothing produces it from natural language yet
-  — today, every `EditCommand` comes from a UI button in the manual editor.
+- **AI prompt interface, beyond the first slice below** (spec sections
+  4–9, 21): a basic "type a prompt, get edits applied" flow now exists
+  (see "AI layer (Phase 4)") — still missing: multi-turn conversation/
+  chat history (each request is independent), any kind of edit preview
+  before commands apply (they apply immediately, same as a manual edit,
+  reversible only via Undo), voice input, and anything resembling a
+  guided/suggested-prompts UI.
 - **Media indexing / natural-language search** (spec section 5–6): no
   object/scene/face detection, no embeddings, no local search index.
-  `MediaRepository` does a flat `MediaStore` query.
+  `MediaRepository` does a flat `MediaStore` query. The AI layer can only
+  reference media already placed in the project (see `EditCommandParser`'s
+  deliberate exclusion of `AddAudio`) — it cannot browse or search the
+  device's media library on the user's behalf.
 - **Photo editor** (spec section 10) beyond a still image as a timeline
   clip: no crop/brightness/filters screen for a single photo.
 - **AI photo features** (background removal, smart crop as a standalone
@@ -723,16 +868,19 @@ AIMediaEditor/
             ├── data/media/{MediaItem, MediaRepository, AudioRepository,
             │               VideoThumbnailLoader, AudioWaveformLoader}.kt
             ├── data/project/{ProjectRecord, ProjectRepository}.kt
+            ├── data/settings/ApiKeyStore.kt
+            ├── ai/{EditCommandToolSchema, EditCommandParser,
+            │       ClaudeEditService}.kt
             ├── editor/{EditorViewModel, MediaMapping}.kt
             ├── editor/model/{ProjectState, EditCommand, ProjectSanitizer,
             │                 ProjectHistory, CropMath, TimelinePositions}.kt
             └── editor/export/{CompositionBuilder, ExportWorker,
                                 PendingExportHolder}.kt
-    └── src/test/java/com/aimediaeditor/app/editor/model/
-        ├── ProjectStateSerializationTest.kt
-        ├── ProjectSanitizerTest.kt
-        ├── CropMathTest.kt
-        └── ProjectHistoryTest.kt
+    └── src/test/java/com/aimediaeditor/app/
+        ├── editor/model/{ProjectStateSerializationTest, ProjectSanitizerTest,
+        │                 CropMathTest, ProjectHistoryTest}.kt
+        └── ai/{EditCommandParserTest, EditCommandToolSchemaTest,
+                ClaudeEditServiceTest}.kt
 ```
 
 Single Gradle module. Split into the `core-*`/`feature-*` layout from spec
@@ -752,6 +900,8 @@ module boundary earns its build-time cost.
 | AndroidX Lifecycle | 2.11.0 | `viewModel()` Compose helper |
 | Coil | 3.3.0 (`io.coil-kt.coil3`) | Local `content://` thumbnails, no network module |
 | kotlinx-serialization-json | 1.9.0 | Project (de)serialization for autosave; the Kotlin plugin variant is pinned to the Kotlin version above (guaranteed matching, not a guess) |
+| JUnit4 | 4.13.2 | `app/src/test` unit test suite (see "Hardening pass") |
+| AndroidX Security Crypto | 1.1.0 | `EncryptedSharedPreferences`-backed storage for the user's own Anthropic API key (`ApiKeyStore`) — chosen over hand-rolled `Cipher`/`Keystore` wiring for the same reason as everywhere else in this project: a well-known first-party library is a smaller risk than rolling your own crypto |
 | compileSdk / targetSdk / minSdk | 37 / 36 / 26 | targetSdk pinned one level back of compileSdk so Android 17's forced behavior changes don't land before they're deliberately handled |
 
 ## Build instructions
@@ -782,15 +932,26 @@ already-verified source into the repository, not re-verifying it.
 Build ▸ Build Bundle(s)/APK(s) ▸ Build APK(s) in Android Studio; output
 lands in `app/build/outputs/apk/debug/`.
 
-## Setup instructions for any AI API — not needed yet
+## Setup instructions for the AI layer
 
-No live AI call exists yet. `EditCommand` is the shape an LLM's output will
-be parsed into once the prompt UI is built. When that's wired up:
-- An LLM to turn a prompt into a JSON `EditCommand` list — e.g. the Claude
-  API, called with a securely-stored key (never bundled into the APK).
-- On-device ML (architecture-notes "Level 1") for indexing/search — e.g.
-  ML Kit for face/object detection and scene labeling with no network call,
-  matching spec section 15's privacy principle.
+A live AI call exists now (see "AI layer (Phase 4)" below) and needs the
+user's own Anthropic API key:
+
+1. Get a key from [console.anthropic.com](https://console.anthropic.com/) —
+   this app makes real, billable API calls under whatever key is entered.
+2. In the app, open a project in the editor, tap "Key" next to the AI prompt
+   bar at the bottom of the screen, paste the key, tap Save.
+3. The key is stored on-device via `EncryptedSharedPreferences`
+   (`data/settings/ApiKeyStore.kt`) and is never bundled into the APK, never
+   sent anywhere except directly to `api.anthropic.com` from the device
+   making the request — no backend/proxy server exists or is planned; each
+   user supplies and pays for their own key.
+
+Still not built: on-device ML (architecture-notes "Level 1") for media
+indexing/search — e.g. ML Kit for face/object detection and scene labeling
+with no network call, matching spec section 15's privacy principle. That
+remains a separate, later piece of Phase 4/5 from the edit-command layer
+described below.
 
 ## Known limitations
 
@@ -878,16 +1039,30 @@ be parsed into once the prompt UI is built. When that's wired up:
   round's hardening scope.
 - Single module, no DI framework.
 - `app/src/test` now exists (see "Hardening pass" below) but only covers
-  `editor/model/` — the pure, portable Kotlin files, the same scope every
-  standalone JVM verification script this project has used all along was
-  already limited to (four test classes now: serialization,
-  `ProjectSanitizer`, `CropMath`, `ProjectHistory`). Everything
-  Android-touching (`data/media/`, `data/project/`, all of `ui/`,
-  `editor/export/`) still has zero automated coverage; only
-  `./gradlew test` (JVM unit tests) is wired up, not
-  `./gradlew connectedAndroidTest` (instrumented, needs a device/emulator)
-  — this sandbox can run neither, so even the new suite is unexecuted here,
-  same caveat as everything else Android-specific in this project.
+  pure, portable Kotlin — `editor/model/` (four test classes:
+  serialization, `ProjectSanitizer`, `CropMath`, `ProjectHistory`) and the
+  parts of `ai/` with no Android/network dependency (three more:
+  `EditCommandParserTest`, `EditCommandToolSchemaTest`,
+  `ClaudeEditServiceTest` — the last of these deliberately excludes
+  `ClaudeEditService.requestEdit()` itself, the actual network call).
+  Everything Android-touching (`data/media/`, `data/project/`,
+  `data/settings/`, all of `ui/`, `editor/export/`, and the network half of
+  `ai/`) still has zero automated coverage; only `./gradlew test` (JVM unit
+  tests) is wired up, not `./gradlew connectedAndroidTest` (instrumented,
+  needs a device/emulator) — this sandbox can run neither, so even the new
+  suite is unexecuted here, same caveat as everything else Android-specific
+  in this project.
+- The AI layer (see its own section above) has no chat history/thread
+  (each prompt works from the CURRENT project only), no way to preview an
+  AI-suggested edit before it applies (it applies immediately and is only
+  reversible via Undo, same as a manual edit — there's no "review, then
+  accept/reject" step), no retry/cancel button on an in-flight request, no
+  usage/cost display, and no rate limiting or spend cap of any kind —
+  every submitted prompt is a real, billable API call under whatever key
+  is stored, with nothing in this app to stop a runaway loop of requests.
+  Only one request can be in flight at a time (the Send button disables
+  while loading), but nothing stops rapid repeated submissions once a
+  response comes back.
 - Not verified: performance on low-RAM devices, 4K sources, thermal
   throttling during export, HDR tone-mapping.
 
@@ -1015,6 +1190,31 @@ Manual, on a real device (no SDK in this sandbox to run instrumented tests):
 12. Create several projects, confirm Home's "Projects" row and the full
     Projects screen agree on what exists and show a sensible relative time
     ("Just now", "Xm ago", etc.) that updates on revisit.
+13a. In the editor, tap "Key" next to the AI prompt bar → confirm the
+     dialog opens, accepts pasted text, and Save closes it. Reopen the
+     dialog → confirm it now offers "Clear" (evidence a key is stored)
+     without ever showing the key's actual value back. Force-close and
+     reopen the app, return to the editor → confirm the key is still
+     considered present (persisted, not just in-memory for the session).
+13b. With a real Anthropic API key entered, type a simple, unambiguous
+     prompt ("make the first clip black and white") and tap Send → confirm
+     a loading indicator shows, then either the requested edit actually
+     appears in the project (confirm via Undo that it's a real, undoable
+     history entry) or a clear error message shows — never a silent
+     no-op or an app crash. Try a prompt requiring several commands at
+     once ("make it black and white and add a fade between the clips") →
+     confirm multiple edits land from one request.
+13c. Try a prompt the AI can't fulfill with the available commands (e.g.
+     "add some upbeat background music" — `AddAudio` is deliberately not
+     exposed to the AI) → confirm the assistant's explanation shows
+     instead of a crash or a silently-ignored request.
+13d. Clear the API key, try to send a prompt → confirm the Send button is
+     disabled (not just that the request fails) and the "no API key set"
+     hint is visible. Enter a deliberately invalid key and try again →
+     confirm a clear, specific error message shows (not a generic crash
+     or an infinite loading spinner). Turn on airplane mode and try a
+     prompt with a valid key → confirm a network-failure message shows
+     rather than a hang.
 
 ## Why it stops here
 
@@ -1038,3 +1238,19 @@ with no codec or device-timing behavior to get subtly wrong — exactly the
 kind of foundation piece that can be genuinely checked from this sandbox
 (see "What's verified vs. not") rather than only written carefully and
 hoped for. The AI layer stays next, once this is confirmed on-device too.
+
+**Update: the AI layer has since started** (see "AI layer (Phase 4)"
+above), explicitly requested rather than picked up on this project's own
+sequencing. The foundation-first reasoning above held for as long as it
+was this project's own call to make; once asked directly to move onto the
+AI layer, the manual editor's own device-verification status hadn't
+changed (still exactly what "What's verified vs. not" describes across
+every round above), so the AI layer now sits on top of a foundation that
+is well-exercised in the places this sandbox can check (persistence,
+`ProjectSanitizer`, crop math, undo/redo — all with real passing test
+suites) and honestly flagged everywhere it can't (every Compose gesture,
+every Media3 call, and now the AI layer's own network call, none of them
+device-confirmed). That's a different foundation-readiness picture than
+"stopped here" implied a few rounds ago, but it's still not "proven
+correct end-to-end" — see the AI layer's own verified/unverified split
+above before treating any of it as trustworthy.

@@ -5,6 +5,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
+import com.aimediaeditor.app.ai.AiEditResult
+import com.aimediaeditor.app.ai.ClaudeEditService
 import com.aimediaeditor.app.data.media.AudioItem
 import com.aimediaeditor.app.data.media.AudioRepository
 import com.aimediaeditor.app.data.media.MediaItem
@@ -34,7 +36,14 @@ data class EditorUiState(
     val canUndo: Boolean,
     val canRedo: Boolean,
     val isLoading: Boolean = false,
-    val availableAudio: List<AudioItem> = emptyList()
+    val availableAudio: List<AudioItem> = emptyList(),
+    val isAiLoading: Boolean = false,
+    // Set after a request completes -- the assistant's own text explanation (present
+    // whether or not it actually called the edit tool) and/or a request-level failure
+    // message (network error, bad API key, malformed response). Cleared by the caller
+    // once shown; see EditorViewModel.clearAiFeedback.
+    val aiMessage: String? = null,
+    val aiError: String? = null
 )
 
 /** How long to let rapid edits (e.g. a trim drag) settle before writing to disk. */
@@ -123,6 +132,38 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(availableAudio = audioRepository.loadAudio())
         }
+    }
+
+    /**
+     * Sends [prompt] to Claude alongside the current project's state, then applies
+     * every [EditCommand] it comes back with through the SAME [ProjectHistory] ->
+     * [com.aimediaeditor.app.editor.model.ProjectSanitizer] path every manual edit
+     * goes through -- the AI layer never touches [ProjectState] directly (architecture
+     * notes section 7). Multiple commands from one response are applied as a single
+     * history step's worth of state updates (one [syncFromHistory] call at the end,
+     * not one per command), so a multi-command AI edit doesn't flash through
+     * intermediate states on screen.
+     */
+    fun submitAiPrompt(apiKey: String, prompt: String) {
+        val h = history ?: return
+        if (_uiState.value.isAiLoading) return // one request in flight at a time
+        _uiState.value = _uiState.value.copy(isAiLoading = true, aiMessage = null, aiError = null)
+        viewModelScope.launch {
+            when (val result = ClaudeEditService.requestEdit(apiKey, h.current, prompt)) {
+                is AiEditResult.Success -> {
+                    result.commands.forEach { h.apply(it) }
+                    syncFromHistory(h)
+                    _uiState.value = _uiState.value.copy(isAiLoading = false, aiMessage = result.assistantMessage)
+                }
+                is AiEditResult.Failure -> {
+                    _uiState.value = _uiState.value.copy(isAiLoading = false, aiError = result.message)
+                }
+            }
+        }
+    }
+
+    fun clearAiFeedback() {
+        _uiState.value = _uiState.value.copy(aiMessage = null, aiError = null)
     }
 
     /**

@@ -51,6 +51,12 @@ dependencies {
     implementation(libs.media3.effect)
     implementation(libs.work.runtime.ktx)
     implementation(libs.kotlinx.serialization.json)
+    // EncryptedSharedPreferences -- the README's own stated plan for the API key is
+    // "a securely-stored key (never bundled into the APK)"; this is the standard,
+    // Google-recommended way to do that on Android rather than hand-rolling AES/
+    // Keystore wiring, which is a much worse risk to get subtly wrong than adding
+    // one well-known first-party library.
+    implementation(libs.androidx.security.crypto)
 
     debugImplementation(libs.androidx.ui.tooling)
 
