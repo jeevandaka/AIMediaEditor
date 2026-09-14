@@ -3,7 +3,7 @@
 Status: **manual editor + real Media3 export pipeline (device-verified) +
 project persistence/autosave (JVM-verified) + several real-device bug fixes
 + a draggable audio timeline + a timeline playhead and zoom + audio
-snapping + on-canvas text positioning (below).** The
+snapping + on-canvas text positioning + real audio waveforms (below).** The
 AI layer (natural-language prompts, media search/indexing) is not built yet
 — everything below is the conventional editor spec section 9 requires to
 exist on its own, plus the non-destructive EDL/command core spec section 21
@@ -29,14 +29,14 @@ N" still means the original product spec, as everywhere earlier in this
 README.
 
 **Built against Tier 1 so far:** a visible timeline playhead and pinch-free
-zoom (+/- buttons), audio drag/trim snapping to clip edges, and on-canvas
+zoom (+/- buttons), audio drag/trim snapping to clip edges, on-canvas
 direct manipulation for text position (drag the overlay on the preview
-itself) — all covered under "What's actually here" below. Still missing
-from Tier 1: true drag-and-drop media placement (media is added by
-selecting then tapping "Add to Project," not dragged onto the timeline),
-audio waveforms (blocks are still solid colour), transitions (none exist),
-and a real multi-effect stack (one filter per clip, not a reorderable list
-of effects).
+itself), and real per-file audio waveforms on the audio lane — all covered
+under "What's actually here" below. Still missing from Tier 1: true
+drag-and-drop media placement (media is added by selecting then tapping
+"Add to Project," not dragged onto the timeline), transitions (none
+exist), and a real multi-effect stack (one filter per clip, not a
+reorderable list of effects).
 
 ## Bug fixes (reported from a real device)
 
@@ -297,6 +297,26 @@ for cropping. Dragging only moves the visible handle live; the command
 cancelled or accidental drag can't leave the project in a half-changed
 state.
 
+**9. Real audio waveforms (UX spec section 8, Tier 1).** The audio lane's
+blocks were, until now, a solid colour with a text label only — no visual
+sense of where the loud/quiet parts of a track actually are, which the
+UX spec flags explicitly (and this README's own "Known limitations" had
+been carrying as an open gap). `data/media/AudioWaveformLoader.kt` decodes
+a track's amplitude envelope using `MediaExtractor` + `MediaCodec` (core
+`android.media`, the same "stable, not Media3" category as
+`VideoThumbnailLoader`'s `MediaMetadataRetriever`, not a UI-thread read of
+the whole file) into a fixed number of peak-amplitude buckets covering the
+source's full duration, normalized against the loudest bucket found so a
+quiet recording still shows a legible shape rather than a near-flat line.
+`AudioTrackStrip` decodes each track's waveform once (`LaunchedEffect`
+keyed on the source URI, not re-run on every drag frame) and draws it as
+vertical bars on a `Canvas` behind the existing label/grip/trim-handle
+layer. Since an audio track here can only be trimmed from the end (its
+start in the source file is fixed — see item 3 above and "Known
+limitations"), the drawn bar count is simply a prefix of the full-source
+waveform sized to the currently played fraction, not a re-decode of a
+different range on every trim drag.
+
 ## What's verified vs. not, this round
 
 The persistence work above is new, plain-Kotlin logic with no Media3/codec
@@ -380,6 +400,30 @@ alone. Needs an on-device check: drag a text overlay to several positions
 (centre, near each edge/corner), confirm the exported video burns the
 text in at the same position the on-canvas handle showed.
 
+The waveform work is the least-verifiable-from-this-sandbox piece of this
+round: `MediaCodec` decode loops (as opposed to `MediaMetadataRetriever`
+frame grabs, which every earlier thumbnail feature used) are new
+territory for this project, and there's no way to actually run one here —
+no Android SDK, no device, no emulator. The implementation follows the
+standard Android `MediaExtractor`/`MediaCodec` decode-loop shape (queue
+input buffers until end-of-stream, drain output buffers, release both),
+but "follows the standard shape" is a much weaker claim than the
+round-trip/backward-compat checks the persistence and text-position work
+above actually got — this genuinely has not been exercised at all, not
+even the plain-Kotlin-logic kind of check the JVM harness gives
+serialization changes (`MediaCodec` requires the Android platform, so it
+can't run in that harness either). One real bug was already caught by
+static reading alone: `MediaFormat.containsKey()` is API 29+ while this
+app's `minSdk` is 26, which would have crashed on API 26–28 devices — the
+code now uses a `try`/`getLong()` pattern instead, but the fact that this
+type of bug was sitting in the first draft is itself a reason to treat
+the rest of this file with the same suspicion until it's actually run.
+Needs an on-device check before it's trusted: does a real audio file
+(not just short clips — a multi-minute track too) decode without
+hanging or OOM-ing, does the drawn shape actually resemble the audio's
+loud/quiet structure, and does trimming a track's length live-update
+the visible bar count correctly.
+
 ## What's not here yet
 
 - **AI prompt interface** (spec sections 4–9, 21): no "Ask AI" screen, no
@@ -426,7 +470,7 @@ AIMediaEditor/
             │              AddAudioDialog}.kt
             ├── ui/projects/{ProjectsScreen, ProjectsViewModel}.kt
             ├── data/media/{MediaItem, MediaRepository, AudioRepository,
-            │               VideoThumbnailLoader}.kt
+            │               VideoThumbnailLoader, AudioWaveformLoader}.kt
             ├── data/project/{ProjectRecord, ProjectRepository}.kt
             ├── editor/{EditorViewModel, MediaMapping}.kt
             ├── editor/model/{ProjectState, EditCommand, ProjectSanitizer,
@@ -529,6 +573,16 @@ be parsed into once the prompt UI is built. When that's wired up:
   long timeline with many clips visible at once. Home's media grid and the
   Projects list still show a play glyph instead of a frame — this loader
   isn't wired into either yet.
+- Audio waveforms (`AudioWaveformLoader`) have the same no-cache-beyond-
+  `remember` limitation as the video filmstrip above, plus its own new
+  ones: the full source file is decoded synchronously on a background
+  thread with no timeout and no cap on file length, so a very long audio
+  source could take a visible moment (or, unverified, could be genuinely
+  slow) before its waveform appears; there's no cache shared across
+  reopening the same project either. The waveform is a peak-per-bucket
+  envelope, not a true min/max or RMS rendering, so very short transient
+  spikes in a bucket's time range can look more prominent than the
+  track's overall loudness in that region would suggest.
 - Single module, no DI framework.
 - No automated test suite wired into the Gradle build itself
   (`app/src/test`) despite `editor/model/` and `data/project/` being pure,
@@ -612,6 +666,14 @@ Manual, on a real device (no SDK in this sandbox to run instrumented tests):
     Undo/Redo reverses/reapplies the position change. Export → confirm the
     burned-in text lands where the on-canvas handle showed, not back at a
     default position.
+9m. Add an audio track from a real music/voice file → confirm its block on
+    the audio lane shows actual vertical bars (not a solid colour) whose
+    heights vary with the track's loud/quiet parts, appearing within a
+    reasonable moment of adding it (not staying blank). Drag its right trim
+    handle shorter → confirm the visible bar count shrinks to match rather
+    than staying the same or showing stale bars. Try a short clip and a
+    long (multi-minute) file → confirm neither hangs, crashes, or leaves
+    the app unresponsive while decoding.
 10. Create a project, make an edit, background the app (Home button) without
     exporting, then kill the app from Recents → relaunch → open it from
     Home's "Projects" row or the Projects screen → confirm the edit is still

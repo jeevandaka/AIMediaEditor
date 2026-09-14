@@ -1,5 +1,6 @@
 package com.aimediaeditor.app.ui.editor
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -7,6 +8,7 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -17,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -24,15 +27,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.aimediaeditor.app.data.media.AudioWaveformLoader
 import com.aimediaeditor.app.editor.model.AudioTrack
 import com.aimediaeditor.app.editor.model.effectiveDurationMs
 
 private const val MIN_AUDIO_DURATION_MS = 300L
+private const val WAVEFORM_BUCKET_COUNT = 80
 
 /**
  * A draggable lane for audio tracks, one block per track, positioned by [AudioTrack.startMs]
@@ -124,6 +132,7 @@ private fun AudioTrackBlock(
     onSnapChanged: (Long?) -> Unit
 ) {
     val density = LocalDensity.current
+    val context = LocalContext.current
     val maxDuration = (track.sourceDurationMs.takeIf { it > 0L } ?: projectDurationMs)
         .coerceAtLeast(MIN_AUDIO_DURATION_MS)
 
@@ -137,6 +146,20 @@ private fun AudioTrackBlock(
         if (it < MIN_CLIP_WIDTH) MIN_CLIP_WIDTH else it
     }
 
+    // Decoded once per source file (not re-decoded on every trim/reposition drag frame --
+    // the shape of the waveform never changes, only how much of it is currently "played",
+    // which is handled at draw time below) and covers the source's FULL duration, not just
+    // the currently trimmed range, since trimming only ever moves the right edge (see the
+    // TrimHandle usage below) -- the drawn portion is a prefix of this array, not a re-fetch.
+    var waveform by remember(track.id) { mutableStateOf<FloatArray?>(null) }
+    LaunchedEffect(track.sourceUri) {
+        waveform = AudioWaveformLoader.loadWaveform(
+            context,
+            android.net.Uri.parse(track.sourceUri),
+            WAVEFORM_BUCKET_COUNT
+        )
+    }
+
     Box(
         modifier = Modifier
             .offset(x = startDp)
@@ -146,6 +169,32 @@ private fun AudioTrackBlock(
             .background(if (isSelected) Color(0xFF2D6A4F) else Color(0xFF1B4332))
             .clickable(onClick = onSelect)
     ) {
+        waveform?.let { amplitudes ->
+            // Only draw the PLAYED prefix of the full-source waveform -- an audio track's
+            // duration here is always trimmed from the end (source's own beginning stays
+            // fixed), so "how much of the bars to show" is exactly the same fraction as
+            // "how much of the source plays", not a re-decode of a different range.
+            val playedFraction = if (track.sourceDurationMs > 0L) {
+                (liveDuration.toFloat() / track.sourceDurationMs).coerceIn(0f, 1f)
+            } else {
+                1f
+            }
+            val barCount = (amplitudes.size * playedFraction).toInt().coerceIn(1, amplitudes.size)
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val barWidth = size.width / barCount
+                for (i in 0 until barCount) {
+                    // A floor so even a near-silent bucket still reads as a bar, not a
+                    // gap that looks like a decode failure.
+                    val barHeight = size.height * amplitudes[i].coerceAtLeast(0.06f)
+                    drawRect(
+                        color = Color.White.copy(alpha = 0.5f),
+                        topLeft = Offset(i * barWidth, (size.height - barHeight) / 2f),
+                        size = Size((barWidth * 0.7f).coerceAtLeast(1f), barHeight)
+                    )
+                }
+            }
+        }
+
         // Position AND length, not just length -- the same "blind" problem the video
         // clips had: a duration-only label doesn't say WHERE on the timeline this track
         // starts, which is the whole point of a draggable, precisely-placeable track.
