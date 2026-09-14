@@ -739,7 +739,9 @@ The persistence work above is new, plain-Kotlin logic with no Media3/codec
 involvement, so it could actually be checked without a device: the exact
 `@Serializable` model in `editor/model/ProjectState.kt` and
 `data/project/ProjectRecord.kt` was copied into a standalone Kotlin/JVM
-Gradle project pinned to this repo's exact Kotlin (2.3.20) and
+Gradle project pinned to this repo's exact Kotlin (2.1.0, corrected from
+an earlier 2.3.20 pin that didn't actually resolve — see a real-device
+fix in this repo's history) and
 `kotlinx-serialization-json` (1.9.0) versions, and round-tripped through
 encode → decode with a project containing multiple clips (video and photo),
 a null focal point, an audio track, a text overlay with non-ASCII text, and
@@ -1034,12 +1036,15 @@ the generated KSP code) is equally unrun; the DAO methods and the
 documented contract, not confirmed against a compiled, running database.
 
 **The single highest build-risk item in this round is not a library
-version, it's the KSP plugin version pin** (`2.3.20-1.0.29` in
-`libs.versions.toml`) — Room's annotation processor requires KSP, and KSP
-releases are versioned against a specific Kotlin compiler version; a
-mismatch here fails Gradle sync itself, before the app even attempts to
-compile, unlike an ordinary dependency version conflict. Confirm this
-resolves cleanly before trusting anything else in this section.
+version, it's the KSP plugin version pin** (`2.1.0-1.0.29` in
+`libs.versions.toml`, paired with `kotlin = "2.1.0"` — both corrected
+from an initial `2.3.20` pin that didn't actually resolve on a real
+device/build; see this repo's own git history) — Room's annotation
+processor requires KSP, and KSP releases are versioned against a
+specific Kotlin compiler version; a mismatch here fails Gradle sync
+itself, before the app even attempts to compile, unlike an ordinary
+dependency version conflict. Confirm this resolves cleanly before
+trusting anything else in this section.
 
 Needs an on-device check before any of this is trusted: grant media
 permission on a device with a real, mixed-content photo/video library,
@@ -1148,7 +1153,7 @@ module boundary earns its build-time cost.
 | Library | Version | Why |
 |---|---|---|
 | Android Gradle Plugin | 9.3.0 | Latest stable as of writing |
-| Kotlin | 2.3.20 | Stable, paired deliberately one minor behind literal-latest |
+| Kotlin | 2.1.0 | Corrected from an initial 2.3.20 pin that didn't actually resolve on a real device/build — see git history |
 | Compose BOM | 2026.08.00 | Requires compileSdk 37 |
 | AndroidX Navigation Compose | 2.9.7 | Home ↔ Editor navigation |
 | Media3 (exoplayer, ui-compose, transformer, effect) | 1.11.0 | Playback preview + real export pipeline |
@@ -1159,7 +1164,7 @@ module boundary earns its build-time cost.
 | JUnit4 | 4.13.2 | `app/src/test` unit test suite (see "Hardening pass") |
 | AndroidX Security Crypto | 1.1.0 | `EncryptedSharedPreferences`-backed storage for the user's own Hugging Face access token (`ModelAccessTokenStore`, formerly `ApiKeyStore` when it held an Anthropic key) — chosen over hand-rolled `Cipher`/`Keystore` wiring for the same reason as everywhere else in this project: a well-known first-party library is a smaller risk than rolling your own crypto |
 | AndroidX Room (runtime, ktx, compiler) | 2.7.1 | The local media index (`data/index/`) — explicitly named by spec section 16, not a discretionary choice; first use of Room in this project, entirely unverified from this sandbox (no Android SDK to compile/run the generated code against) |
-| KSP (`com.google.devtools.ksp`) | 2.3.20-1.0.29 | Room's annotation processor. **Highest BUILD-sync-failure risk**: KSP releases are versioned against a specific Kotlin compiler version, and this pin must exactly match the Kotlin version above or Gradle sync itself fails, before the app even attempts to compile |
+| KSP (`com.google.devtools.ksp`) | 2.1.0-1.0.29 | Room's annotation processor. **Highest BUILD-sync-failure risk**: KSP releases are versioned against a specific Kotlin compiler version, and this pin must exactly match the Kotlin version above or Gradle sync itself fails, before the app even attempts to compile |
 | AndroidX ExifInterface | 1.3.7 | Reads GPS EXIF data from photos for `MediaAnalyzer`'s locality extraction (paired with `ACCESS_MEDIA_LOCATION`, newly declared this round) |
 | ML Kit Image Labeling | 17.0.9 | On-device object/scene labels for search (`MediaAnalyzer`) — first ML Kit usage in this project, entirely unverified from this sandbox |
 | ML Kit Face Detection | 16.1.7 | On-device face presence/count for search's "photos of people" style queries — presence/count only, no identity or recognition |
