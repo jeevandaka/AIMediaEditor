@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.ksp)
 }
 
 android {
@@ -32,6 +33,14 @@ android {
     }
 }
 
+ksp {
+    // Room's own recommended setup -- exports the DB schema per version to a
+    // checked-in-able directory, which is what a future migration would diff
+    // against. No migrations exist yet (schema version 1), but this costs nothing
+    // to set up now versus retrofitting it once a real migration is needed.
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
@@ -57,6 +66,19 @@ dependencies {
     // Keystore wiring, which is a much worse risk to get subtly wrong than adding
     // one well-known first-party library.
     implementation(libs.androidx.security.crypto)
+
+    // Media index (spec sections 5/6/20): a local, on-device database of what's IN the
+    // user's media, built once and queried for natural-language search -- explicitly
+    // named in spec section 16's suggested architecture, not a new choice.
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)
+    ksp(libs.androidx.room.compiler)
+    // EXIF GPS extraction from photos (ACCESS_MEDIA_LOCATION-gated, see AndroidManifest).
+    implementation(libs.androidx.exifinterface)
+    // On-device (Level 1, spec section 20) object/scene labeling and face detection --
+    // no network call, no cloud upload, matching spec section 15's privacy principle.
+    implementation(libs.mlkit.image.labeling)
+    implementation(libs.mlkit.face.detection)
 
     debugImplementation(libs.androidx.ui.tooling)
 

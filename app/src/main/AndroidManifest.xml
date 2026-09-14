@@ -23,6 +23,12 @@
          (ClaudeEditService) -- without this, the OS blocks outbound sockets for this
          app entirely, regardless of anything the app-level code does right. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Media indexing (spec sections 5/6): READ_MEDIA_IMAGES/VIDEO above only grant
+         access to the files themselves -- GPS coordinates embedded in a photo's EXIF
+         data (or a video's location metadata) are separately redacted by the OS unless
+         this is also held, since API 29 (see MediaAnalyzer). Without it, location-based
+         search ("photos from Goa") silently has nothing to match against, not a crash. -->
+    <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
 
     <application
         android:allowBackup="true"

@@ -67,7 +67,8 @@ fun HomeScreen(
     viewModel: HomeViewModel = viewModel(),
     onCreateProject: (List<MediaItem>) -> Unit = {},
     onOpenProject: (String) -> Unit = {},
-    onOpenProjects: () -> Unit = {}
+    onOpenProjects: () -> Unit = {},
+    onOpenSearch: () -> Unit = {}
 ) {
     val permissionState = rememberMediaPermissionState()
     val uiState by viewModel.uiState.collectAsState()
@@ -104,7 +105,12 @@ fun HomeScreen(
                     }
                 )
             } else {
-                TopAppBar(title = { Text("AI Media Editor") })
+                TopAppBar(
+                    title = { Text("AI Media Editor") },
+                    actions = {
+                        TextButton(onClick = onOpenSearch) { Text("Search") }
+                    }
+                )
             }
         },
         floatingActionButton = {
